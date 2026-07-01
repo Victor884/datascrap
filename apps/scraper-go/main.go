@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -584,9 +585,14 @@ func (source SerpAPISource) fetchSearch(ctx context.Context, client *http.Client
 func main() {
 	query := flag.String("query", "engenheiro de dados junior,engenheiro dados junior,engenheiro de dados jr,analista de dados junior,analista dados junior,analista de dados jr,desenvolvedor python,junior data engineer,data engineer junior,junior data analyst,data analyst junior,python developer,etl,elt,pipeline de dados,data pipeline,data warehouse,data lake,python,sql,pyspark,apache spark,databricks,ibm datastage,apache airflow,db2,postgresql,mysql,power bi,n8n,power automate,selenium,rest api,json,gcp,docker,kafka", "comma-separated job and technology keywords")
 	format := flag.String("format", "csv", "output format: csv or json")
-	out := flag.String("out", "vagas-dados.csv", "output file path")
+	out := flag.String("out", "data/raw/vagas-dados.csv", "output file path")
 	timeout := flag.Duration("timeout", 90*time.Second, "request timeout")
 	flag.Parse()
+
+	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "Erro ao criar diretório de saída: %v\n", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()

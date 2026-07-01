@@ -139,7 +139,7 @@ def scrape_term(term, sites, results_wanted, hours_old, verbose):
 
 def main():
     parser = argparse.ArgumentParser(description="Busca vagas com JobSpy e exporta no schema do DataScrap.")
-    parser.add_argument("--out", default="vagas-jobspy.csv", help="Arquivo CSV de saida.")
+    parser.add_argument("--out", default="data/raw/vagas-jobspy.csv", help="Arquivo CSV de saida.")
     parser.add_argument("--results", type=int, default=20, help="Resultados por site e por termo.")
     parser.add_argument("--hours-old", type=int, default=168, help="Somente vagas publicadas nas ultimas N horas.")
     parser.add_argument("--sites", default=",".join(DEFAULT_SITES), help="Sites separados por virgula.")
@@ -175,6 +175,7 @@ def main():
         time.sleep(args.delay)
 
     output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "source",
         "title",

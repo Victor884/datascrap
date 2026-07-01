@@ -28,11 +28,11 @@ jobs:
       - name: Instalar dependências
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-jobspy.txt
+          pip install -r pipelines/requirements.txt
 
       - name: Rodar scrapers
         run: |
-          python scripts/jobspy_scraper.py
+          python pipelines/jobspy_scraper.py --out data/raw/vagas-jobspy.csv
 
       - name: Configurar Go
         uses: actions/setup-go@v5
@@ -41,12 +41,16 @@ jobs:
 
       - name: Rodar scraper em Go
         run: |
-          go run cmd/datascrap/main.go --out vagas-dados.csv
+          go run ./apps/scraper-go --out data/raw/vagas-dados.csv
 
-      - name: Salvar resultados no repositório
+      - name: Processar dados brutos
         run: |
-          git config --local user.name "github-actions[bot]"
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git add vagas-jobspy.csv vagas-dados.csv
-          git commit -m "Atualizando base de vagas [skip ci]" || true
-          git push
+          python pipelines/clean_jobs.py --input-dir data/raw --out data/processed/vagas-processadas.csv
+
+      - name: Publicar artefatos gerados
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-job-data
+          path: |
+            data/raw/*.csv
+            data/processed/*.csv

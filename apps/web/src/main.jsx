@@ -25,29 +25,25 @@ import {
 import './styles.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:5000';
-
-const FALLBACK_JOBS = [
-  {
-    id: 'demo-1',
-    source: 'gupy',
-    title: 'Engenheiro de Dados Pleno',
-    company: 'Stone',
-    location: 'Remoto Brasil',
-    location_mode: 'remote_brazil',
-    posted_at: '2026-06-30',
-    url: '#',
-    tags: ['CLT'],
-    matched_technologies: ['python', 'pyspark', 'sql', 'databricks', 'airflow'],
-    match_score: 5,
-    salary_min: 10000,
-    salary_max: 14000,
-    salary_currency: 'BRL',
-    salary_period: 'mensal'
-  }
-];
+const DEFAULT_FILTERS = {
+  query: '',
+  source: 'all',
+  locationMode: 'remote_brazil',
+  tech: 'all',
+  salaryOnly: false,
+  salaryRange: 'all',
+  seniority: 'all',
+  city: '',
+  period: '30',
+  sort: 'posted_desc',
+  page: 1,
+  pageSize: 25,
+  refreshKey: 0
+};
 
 function useApiData(filters) {
   const [jobs, setJobs] = useState([]);
+  const [total, setTotal] = useState(0);
   const [insights, setInsights] = useState(null);
   const [options, setOptions] = useState({ sources: [], technologies: [], companies: [] });
   const [loading, setLoading] = useState(true);
@@ -60,13 +56,20 @@ function useApiData(filters) {
       setError('');
       try {
         const params = new URLSearchParams();
-        params.set('limit', '200');
+        params.set('limit', String(filters.pageSize));
+        params.set('offset', String((filters.page - 1) * filters.pageSize));
         params.set('sort', filters.sort);
         if (filters.query) params.set('q', filters.query);
         if (filters.source !== 'all') params.set('source', filters.source);
         if (filters.locationMode !== 'all') params.set('location_mode', filters.locationMode);
         if (filters.tech !== 'all') params.set('tech', filters.tech);
+        if (filters.seniority !== 'all') params.set('seniority', filters.seniority);
+        if (filters.city) params.set('city', filters.city);
+        if (filters.period !== 'all') params.set('days', filters.period);
         if (filters.salaryOnly) params.set('salary', 'with_salary');
+        const salaryRange = salaryRangeParams(filters.salaryRange);
+        if (salaryRange.min_salary) params.set('min_salary', salaryRange.min_salary);
+        if (salaryRange.max_salary) params.set('max_salary', salaryRange.max_salary);
 
         const [jobsRes, insightsRes, filtersRes] = await Promise.all([
           fetch(`${API_BASE}/api/jobs?${params}`, { signal: controller.signal }),
@@ -80,13 +83,16 @@ function useApiData(filters) {
         const insightsJson = await insightsRes.json();
         const filtersJson = await filtersRes.json();
         setJobs(jobsJson.items ?? []);
+        setTotal(jobsJson.total ?? 0);
         setInsights(insightsJson);
         setOptions(filtersJson);
       } catch (err) {
         if (err.name === 'AbortError') return;
         setError(err.message);
-        setJobs(FALLBACK_JOBS);
-        setInsights(buildFallbackInsights(FALLBACK_JOBS));
+        setJobs([]);
+        setTotal(0);
+        setInsights(null);
+        setOptions({ sources: [], technologies: [], companies: [] });
       } finally {
         setLoading(false);
       }
@@ -95,36 +101,17 @@ function useApiData(filters) {
     return () => controller.abort();
   }, [filters]);
 
-  return { jobs, insights, options, loading, error };
-}
-
-function buildFallbackInsights(jobs) {
-  return {
-    total_jobs: jobs.length,
-    average_match: 5,
-    sources_active: 1,
-    remote_brazil_jobs: 1,
-    brasilia_jobs: 0,
-    by_source: [{ name: 'gupy', count: 1 }],
-    by_day: [{ date: '2026-06-30', count: 1 }],
-    by_technology: [
-      { name: 'python', count: 1 },
-      { name: 'pyspark', count: 1 },
-      { name: 'sql', count: 1 }
-    ]
-  };
+  return { jobs, total, insights, options, loading, error };
 }
 
 function App() {
-  const [filters, setFilters] = useState({
-    query: '',
-    source: 'all',
-    locationMode: 'remote_brazil',
-    tech: 'all',
-    salaryOnly: false,
-    sort: 'posted_desc'
-  });
-  const { jobs, insights, options, loading, error } = useApiData(filters);
+  const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const [view, setView] = useState('vagas');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [detailOpen, setDetailOpen] = useState(true);
+  const [sourceExpanded, setSourceExpanded] = useState(false);
+  const [statusOpen, setStatusOpen] = useState(false);
+  const { jobs, total, insights, options, loading, error } = useApiData(filters);
   const [selectedId, setSelectedId] = useState('');
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedId) ?? jobs[0], [jobs, selectedId]);
 
@@ -135,33 +122,52 @@ function App() {
   }, [jobs, selectedId]);
 
   const activeSources = insights?.sources_active ?? 0;
-  const totalJobs = insights?.total_jobs ?? jobs.length;
+  const totalJobs = insights?.total_jobs ?? total;
+  const patchFilters = (patch) => setFilters((current) => ({ ...current, ...patch, page: patch.page ?? 1 }));
+  const refreshData = async () => {
+    try {
+      await fetch(`${API_BASE}/api/reload`, { method: 'POST' });
+    } catch {
+      // A busca seguinte mostra o erro se a API estiver indisponivel.
+    } finally {
+      setFilters((current) => ({ ...current, refreshKey: current.refreshKey + 1 }));
+    }
+  };
 
   return (
     <div className="app-shell">
-      <TopBar activeSources={activeSources} loading={loading} />
-      <div className="workspace">
-        <Sidebar filters={filters} setFilters={setFilters} options={options} />
+      <TopBar activeSources={activeSources} latest={latestCollectionLabel(insights?.by_day)} loading={loading} view={view} setView={setView} onRefresh={refreshData} statusOpen={statusOpen} setStatusOpen={setStatusOpen} total={totalJobs} error={error} />
+      <div className={`workspace ${!sidebarOpen ? 'sidebar-collapsed' : ''} ${!detailOpen ? 'detail-collapsed' : ''}`}>
+        {sidebarOpen && <Sidebar filters={filters} setFilters={patchFilters} options={options} insights={insights} sourceExpanded={sourceExpanded} setSourceExpanded={setSourceExpanded} />}
         <main className="main-content">
-          {error && <div className="api-warning">API offline ou indisponível. Exibindo dados de demonstração.</div>}
+          {error && <div className="api-warning">API offline ou indisponivel. Inicie o Flask em http://127.0.0.1:5000 para carregar dados reais.</div>}
           <MetricGrid insights={insights} totalJobs={totalJobs} />
           <ChartGrid insights={insights} />
-          <JobsTable
-            jobs={jobs}
-            selectedJob={selectedJob}
-            onSelect={setSelectedId}
-            filters={filters}
-            setFilters={setFilters}
-            loading={loading}
-          />
+          {view === 'insights' ? (
+            <InsightsView insights={insights} jobs={jobs} />
+          ) : (
+            <JobsTable
+              jobs={jobs}
+              total={total}
+              selectedJob={selectedJob}
+              onSelect={(id) => {
+                setSelectedId(id);
+                setDetailOpen(true);
+              }}
+              filters={filters}
+              setFilters={patchFilters}
+              loading={loading}
+              onToggleSidebar={() => setSidebarOpen((value) => !value)}
+            />
+          )}
         </main>
-        <DetailPanel job={selectedJob} />
+        {detailOpen && <DetailPanel job={selectedJob} onClose={() => setDetailOpen(false)} />}
       </div>
     </div>
   );
 }
 
-function TopBar({ activeSources, loading }) {
+function TopBar({ activeSources, latest, loading, view, setView, onRefresh, statusOpen, setStatusOpen, total, error }) {
   return (
     <header className="topbar">
       <div className="brand-mark">
@@ -177,13 +183,13 @@ function TopBar({ activeSources, loading }) {
       </div>
       <div className="brand-title">DataScrap</div>
       <nav className="tabs">
-        <button className="tab active">Vagas</button>
-        <button className="tab">Insights</button>
+        <button className={`tab ${view === 'vagas' ? 'active' : ''}`} onClick={() => setView('vagas')}>Vagas</button>
+        <button className={`tab ${view === 'insights' ? 'active' : ''}`} onClick={() => setView('insights')}>Insights</button>
       </nav>
       <div className="top-actions">
-        <button className="action-button">
+        <button className="action-button" onClick={onRefresh} disabled={loading}>
           <Upload size={16} />
-          Importar agora
+          Atualizar agora
         </button>
         <div className="status-pill">
           <Clock3 size={16} />
@@ -191,77 +197,79 @@ function TopBar({ activeSources, loading }) {
         </div>
         <div className="status-pill">
           <span className="live-dot" />
-          Última coleta: há 23 min
+          Última coleta: {latest}
         </div>
         <div className="status-pill">
           <Database size={16} />
           Fontes ativas <strong>{activeSources}/10</strong>
         </div>
-        <button className="icon-button" aria-label="Configurações">
+        <button className="icon-button" aria-label="Configuracoes" onClick={() => setStatusOpen(!statusOpen)}>
           {loading ? <Loader2 className="spin" size={18} /> : <Settings size={18} />}
         </button>
+        {statusOpen && (
+          <div className="status-popover">
+            <strong>Status da API</strong>
+            <span>{error ? 'Offline' : 'Online'}</span>
+            <span>{formatNumber(total)} vagas filtradas</span>
+            <span>Base: {API_BASE}</span>
+          </div>
+        )}
       </div>
     </header>
   );
 }
 
-function Sidebar({ filters, setFilters, options }) {
-  const sources = options.sources?.length ? options.sources : ['indeed', 'linkedin', 'jobicy'];
-  const techs = options.technologies?.length ? options.technologies : ['python', 'pyspark', 'sql', 'databricks'];
+function Sidebar({ filters, setFilters, options, insights, sourceExpanded, setSourceExpanded }) {
+  const sources = options.sources ?? [];
+  const techs = options.technologies ?? [];
+  const sourceCounts = countMap(insights?.by_source);
+  const techCounts = countMap(insights?.by_technology);
 
   return (
     <aside className="sidebar">
       <div className="filter-header">
         <h2>Filtros</h2>
-        <button
-          onClick={() =>
-            setFilters({
-              query: '',
-              source: 'all',
-              locationMode: 'remote_brazil',
-              tech: 'all',
-              salaryOnly: false,
-              sort: 'posted_desc'
-            })
-          }
-        >
+        <button onClick={() => setFilters(DEFAULT_FILTERS)}>
           Limpar tudo
         </button>
       </div>
 
       <section className="filter-section">
         <Label>Fontes</Label>
-        <CheckboxRow label="Todas" count={sources.length} checked={filters.source === 'all'} onClick={() => setFilters({ ...filters, source: 'all' })} />
-        {sources.slice(0, 5).map((source, index) => (
+        <CheckboxRow label="Todas" count={insights?.total_jobs ?? 0} checked={filters.source === 'all'} onClick={() => setFilters({ ...filters, source: 'all' })} />
+        {(sourceExpanded ? sources : sources.slice(0, 5)).map((source) => (
           <CheckboxRow
             key={source}
             label={sourceLabel(source)}
-            count={[2341, 1287, 862, 742, 431][index] ?? 128}
+            count={sourceCounts.get(source) ?? 0}
             checked={filters.source === source}
             onClick={() => setFilters({ ...filters, source })}
           />
         ))}
-        <button className="subtle-link">Ver mais <ChevronDown size={14} /></button>
+        {sources.length > 5 && (
+          <button className="subtle-link" onClick={() => setSourceExpanded(!sourceExpanded)}>
+            {sourceExpanded ? 'Ver menos' : 'Ver mais'} <ChevronDown size={14} />
+          </button>
+        )}
       </section>
 
       <section className="filter-section">
-        <Label>Localização</Label>
-        <SelectLike value={locationModeLabel(filters.locationMode)} onClear={() => setFilters({ ...filters, locationMode: 'all' })} />
-        <ToggleRow label="Incluir vagas presenciais" checked={filters.locationMode === 'all'} onClick={() => setFilters({ ...filters, locationMode: filters.locationMode === 'all' ? 'remote_brazil' : 'all' })} />
+        <Label>Localizacao</Label>
+        <NativeSelect value={filters.locationMode} onChange={(value) => setFilters({ locationMode: value })}>
+          <option value="remote_brazil">Remoto Brasil</option>
+          <option value="brasilia">Brasilia presencial/hibrido</option>
+          <option value="all">Todas do Brasil mapeadas</option>
+        </NativeSelect>
+        <ToggleRow label="Incluir vagas presenciais" checked={filters.locationMode === 'all'} onClick={() => setFilters({ locationMode: filters.locationMode === 'all' ? 'remote_brazil' : 'all' })} />
         <div className="small-label">Cidade (opcional)</div>
-        <ChipInput value="Brasília" />
+        <TextInput value={filters.city} placeholder="Ex.: Brasilia" onChange={(value) => setFilters({ city: value })} />
       </section>
 
       <section className="filter-section">
-        <Label>Nível de senioridade</Label>
-        {[
-          ['Estágio', 128],
-          ['Júnior', 1102],
-          ['Pleno', 2156],
-          ['Sênior', 1245],
-          ['Especialista', 512]
-        ].map(([label, count]) => (
-          <CheckboxRow key={label} label={label} count={count} checked />
+        <Label>Nivel de senioridade</Label>
+        <CheckboxRow label="Todos" checked={filters.seniority === 'all'} onClick={() => setFilters({ seniority: 'all' })} />
+        {['Estagio', 'Junior', 'Pleno', 'Senior', 'Especialista'].map((label) => (
+          <CheckboxRow key={label} label={seniorityLabel(label)} checked={filters.seniority === label} onClick={() => setFilters({ seniority: filters.seniority === label ? 'all' : label })} />
         ))}
       </section>
 
@@ -275,6 +283,7 @@ function Sidebar({ filters, setFilters, options }) {
               onClick={() => setFilters({ ...filters, tech: filters.tech === tech ? 'all' : tech })}
             >
               {tech}
+              <small>{techCounts.get(tech) ?? 0}</small>
               <X size={13} />
             </button>
           ))}
@@ -282,20 +291,28 @@ function Sidebar({ filters, setFilters, options }) {
       </section>
 
       <section className="filter-section">
-        <Label>Período de publicação</Label>
-        <SelectLike value="Últimos 30 dias" />
+        <Label>Periodo de publicacao</Label>
+        <NativeSelect value={filters.period} onChange={(value) => setFilters({ period: value })}>
+          <option value="7">Ultimos 7 dias</option>
+          <option value="30">Ultimos 30 dias</option>
+          <option value="90">Ultimos 90 dias</option>
+          <option value="all">Todo o historico</option>
+        </NativeSelect>
         <div className="date-range">
-          <span>01/06/2026</span>
-          <span>–</span>
-          <span>30/06/2026</span>
+          <span>{periodRangeLabel(filters.period)}</span>
           <CalendarDays size={15} />
         </div>
       </section>
 
       <section className="filter-section">
         <Label>Faixa salarial</Label>
-        <ToggleRow label="Somente com salário" checked={filters.salaryOnly} onClick={() => setFilters({ ...filters, salaryOnly: !filters.salaryOnly })} />
-        <SelectLike value="Qualquer faixa" />
+        <ToggleRow label="Somente com salario" checked={filters.salaryOnly} onClick={() => setFilters({ salaryOnly: !filters.salaryOnly })} />
+        <NativeSelect value={filters.salaryRange} onChange={(value) => setFilters({ salaryRange: value, salaryOnly: value !== 'all' || filters.salaryOnly })}>
+          <option value="all">Qualquer faixa</option>
+          <option value="0-8000">Ate R$ 8 mil</option>
+          <option value="8000-15000">R$ 8 mil a R$ 15 mil</option>
+          <option value="15000+">Acima de R$ 15 mil</option>
+        </NativeSelect>
       </section>
     </aside>
   );
@@ -315,7 +332,7 @@ function CheckboxRow({ label, count, checked, onClick }) {
     <button className="check-row" onClick={onClick}>
       <span className={`box ${checked ? 'checked' : ''}`}>{checked && <Check size={12} />}</span>
       <span>{label}</span>
-      <small>{count}</small>
+      {typeof count === 'number' && <small>{formatNumber(count)}</small>}
     </button>
   );
 }
@@ -341,6 +358,20 @@ function SelectLike({ value, onClear }) {
   );
 }
 
+function NativeSelect({ value, onChange, children }) {
+  return (
+    <select className="native-select" value={value} onChange={(event) => onChange(event.target.value)}>
+      {children}
+    </select>
+  );
+}
+
+function TextInput({ value, placeholder, onChange }) {
+  return (
+    <input className="text-filter" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+  );
+}
+
 function ChipInput({ value }) {
   return (
     <div className="chip-input">
@@ -357,10 +388,10 @@ function MetricGrid({ insights, totalJobs }) {
 
   return (
     <section className="metric-grid">
-      <MetricCard title="Vagas encontradas" value={formatNumber(totalJobs)} trend="18,6% vs. período anterior" />
-      <MetricCard title="Match médio" value={`${Number.isFinite(average) ? average : 0}%`} trend="6 p.p. vs. período anterior" />
-      <MetricCard title="Fontes ativas" value={`${sources} / 10`} accent={`${Math.round((sources / 10) * 100)}% das fontes`} />
-      <MetricCard title="Última coleta" value="há 23 min" meta={latest} icon={<Clock3 size={16} />} />
+      <MetricCard title="Vagas encontradas" value={formatNumber(totalJobs)} meta={`${formatNumber(insights?.remote_brazil_jobs ?? 0)} remotas Brasil`} />
+      <MetricCard title="Match médio" value={`${Number.isFinite(average) ? average : 0}%`} meta={`${insights?.average_match ?? 0} tecnologias por vaga`} />
+      <MetricCard title="Fontes ativas" value={`${sources} / 10`} accent={`${formatNumber(insights?.with_salary ?? 0)} com salario`} />
+      <MetricCard title="Última coleta" value={latest} meta={`${formatNumber(insights?.brasilia_jobs ?? 0)} vagas em Brasilia`} icon={<Clock3 size={16} />} />
     </section>
   );
 }
@@ -407,6 +438,7 @@ function ChartCard({ title, children }) {
 }
 
 function BarChart({ data }) {
+  if (!data.length) return <EmptyChart message="Sem dados por dia" />;
   const max = Math.max(...data.map((item) => item.value), 1);
   return (
     <div className="bar-chart">
@@ -425,7 +457,8 @@ function BarChart({ data }) {
 }
 
 function LineChart({ data }) {
-  const values = data.length ? data.map((item) => item.value) : [3, 4, 5, 3, 6, 5, 7];
+  if (!data.length) return <EmptyChart message="Sem tecnologias correspondentes" />;
+  const values = data.map((item) => item.value);
   const max = Math.max(...values, 1);
   const points = values.map((value, index) => {
     const x = (index / Math.max(values.length - 1, 1)) * 280;
@@ -450,6 +483,7 @@ function LineChart({ data }) {
 }
 
 function HorizontalBars({ data }) {
+  if (!data.length) return <EmptyChart message="Sem dados por fonte" />;
   const max = Math.max(...data.map((item) => item.count), 1);
   return (
     <div className="hbars">
@@ -464,28 +498,36 @@ function HorizontalBars({ data }) {
   );
 }
 
-function JobsTable({ jobs, selectedJob, onSelect, filters, setFilters, loading }) {
+function EmptyChart({ message }) {
+  return <div className="empty-chart">{message}</div>;
+}
+
+function JobsTable({ jobs, total, selectedJob, onSelect, filters, setFilters, loading, onToggleSidebar }) {
+  const totalPages = Math.max(1, Math.ceil(total / filters.pageSize));
+  const start = total ? (filters.page - 1) * filters.pageSize + 1 : 0;
+  const end = Math.min(filters.page * filters.pageSize, total);
+
   return (
     <section className="table-panel">
       <div className="table-toolbar">
-        <strong>{formatNumber(jobs.length)} vagas</strong>
+        <strong>{formatNumber(total)} vagas</strong>
         <label className="search-box">
           <Search size={16} />
           <input
             value={filters.query}
-            onChange={(event) => setFilters({ ...filters, query: event.target.value })}
+            onChange={(event) => setFilters({ query: event.target.value })}
             placeholder="Buscar título, empresa ou tecnologia"
           />
         </label>
         <div className="spacer" />
         <span>Ordenar por:</span>
-        <select value={filters.sort} onChange={(event) => setFilters({ ...filters, sort: event.target.value })}>
+        <select value={filters.sort} onChange={(event) => setFilters({ sort: event.target.value })}>
           <option value="posted_desc">Mais recentes</option>
           <option value="match_desc">Maior match</option>
           <option value="company_asc">Empresa</option>
         </select>
-        <button className="outline-button"><Download size={16} /> Exportar</button>
-        <button className="icon-button"><SlidersHorizontal size={17} /></button>
+        <button className="outline-button" onClick={() => downloadJobsCsv(jobs)}><Download size={16} /> Exportar</button>
+        <button className="icon-button" onClick={onToggleSidebar} aria-label="Alternar filtros"><SlidersHorizontal size={17} /></button>
       </div>
       <div className="table-wrap">
         <table>
@@ -506,6 +548,11 @@ function JobsTable({ jobs, selectedJob, onSelect, filters, setFilters, loading }
             {loading && (
               <tr>
                 <td colSpan="9" className="loading-row"><Loader2 className="spin" size={18} /> Carregando vagas...</td>
+              </tr>
+            )}
+            {!loading && !jobs.length && (
+              <tr>
+                <td colSpan="9" className="loading-row">Nenhuma vaga encontrada para os filtros atuais.</td>
               </tr>
             )}
             {!loading && jobs.map((job) => (
@@ -529,28 +576,64 @@ function JobsTable({ jobs, selectedJob, onSelect, filters, setFilters, loading }
         </table>
       </div>
       <div className="pagination">
-        <span>Linhas por página:</span>
-        <select defaultValue="25"><option>25</option><option>50</option></select>
-        <span>1–{Math.min(jobs.length, 25)} de {formatNumber(jobs.length)}</span>
+        <span>Linhas por pagina:</span>
+        <select value={filters.pageSize} onChange={(event) => setFilters({ pageSize: Number(event.target.value), page: 1 })}><option>10</option><option>25</option><option>50</option><option>100</option></select>
+        <span>{`${start}-${end} de ${formatNumber(total)}`}</span>
         <div className="pager-buttons">
-          <ChevronLeft size={16} />
-          <button className="page-active">1</button>
-          <button>2</button>
-          <button>3</button>
-          <span>...</span>
-          <button>272</button>
-          <ChevronRight size={16} />
+          <button disabled={filters.page <= 1} onClick={() => setFilters({ page: Math.max(1, filters.page - 1) })}><ChevronLeft size={16} /></button>
+          <button className="page-active">{filters.page}</button>
+          {totalPages > filters.page && <button onClick={() => setFilters({ page: Math.min(totalPages, filters.page + 1) })}>{filters.page + 1}</button>}
+          {totalPages > filters.page + 1 && <span>...</span>}
+          {totalPages > filters.page + 1 && <button onClick={() => setFilters({ page: totalPages })}>{totalPages}</button>}
+          <button disabled={filters.page >= totalPages} onClick={() => setFilters({ page: Math.min(totalPages, filters.page + 1) })}><ChevronRight size={16} /></button>
         </div>
       </div>
     </section>
   );
 }
 
-function DetailPanel({ job }) {
+function InsightsView({ insights, jobs }) {
+  return (
+    <section className="insights-panel">
+      <div className="insight-list">
+        <InsightCard title="Top empresas" items={insights?.by_company ?? []} empty="Sem empresas no filtro atual" />
+        <InsightCard title="Senioridade" items={insights?.by_seniority ?? []} empty="Sem senioridade mapeada" />
+        <InsightCard title="Tecnologias" items={insights?.by_technology ?? []} empty="Sem tecnologias no filtro atual" />
+      </div>
+      <div className="insight-table">
+        <h3>Vagas com maior match</h3>
+        {jobs.slice().sort((a, b) => matchPercent(b) - matchPercent(a)).slice(0, 8).map((job) => (
+          <div className="insight-job" key={job.id}>
+            <span>{job.title}</span>
+            <small>{job.company || 'Empresa nao informada'} - {sourceLabel(job.source)}</small>
+            <strong>{matchPercent(job)}%</strong>
+          </div>
+        ))}
+        {!jobs.length && <div className="empty-chart">Sem vagas para gerar ranking.</div>}
+      </div>
+    </section>
+  );
+}
+
+function InsightCard({ title, items, empty }) {
+  return (
+    <article className="insight-card">
+      <h3>{title}</h3>
+      {items.length ? items.slice(0, 8).map((item) => (
+        <div className="insight-row" key={item.name}>
+          <span>{item.name}</span>
+          <strong>{formatNumber(item.count)}</strong>
+        </div>
+      )) : <div className="empty-chart">{empty}</div>}
+    </article>
+  );
+}
+
+function DetailPanel({ job, onClose }) {
   if (!job) {
     return (
       <aside className="detail-panel">
-        <button className="close-button"><X size={22} /></button>
+        <button className="close-button" onClick={onClose}><X size={22} /></button>
         <div className="empty-detail">Selecione uma vaga para ver os detalhes.</div>
       </aside>
     );
@@ -558,7 +641,7 @@ function DetailPanel({ job }) {
 
   return (
     <aside className="detail-panel">
-      <button className="close-button"><X size={22} /></button>
+      <button className="close-button" onClick={onClose}><X size={22} /></button>
       <div className="detail-heading">
         <div>
           <h1>{job.title}</h1>
@@ -593,9 +676,11 @@ function DetailPanel({ job }) {
       <section className="detail-section">
         <h2>Palavras-chave correspondentes</h2>
         <div className="keyword-list">
-          {(job.matched_technologies?.length ? job.matched_technologies : ['python', 'sql']).map((tech) => (
-            <span key={tech}>{tech}</span>
-          ))}
+          {job.matched_technologies?.length ? (
+            job.matched_technologies.map((tech) => <span key={tech}>{tech}</span>)
+          ) : (
+            <em className="empty-inline">Nenhuma tecnologia mapeada</em>
+          )}
         </div>
       </section>
 
@@ -670,11 +755,24 @@ function currency(value) {
 }
 
 function seniority(job) {
+  if (job?.seniority) return seniorityLabel(job.seniority);
   const text = `${job?.title ?? ''} ${job?.tags?.join(' ') ?? ''}`.toLowerCase();
   if (text.includes('junior') || text.includes('júnior') || text.includes('jr')) return 'Júnior';
   if (text.includes('senior') || text.includes('sênior')) return 'Sênior';
   if (text.includes('estágio') || text.includes('intern')) return 'Estágio';
   return 'Pleno';
+}
+
+function seniorityLabel(value = '') {
+  const labels = {
+    Estagio: 'Estagio',
+    Junior: 'Junior',
+    Pleno: 'Pleno',
+    Senior: 'Senior',
+    Especialista: 'Especialista',
+    'Nao informado': 'Nao informado'
+  };
+  return labels[value] ?? value;
 }
 
 function matchPercent(job) {
@@ -692,6 +790,10 @@ function dateLabel(value) {
 function latestCollectionLabel(days = []) {
   const latest = days?.[days.length - 1]?.date;
   return latest ? dateLabel(latest) : '—';
+}
+
+function countMap(items = []) {
+  return new Map(items.map((item) => [item.name, item.count]));
 }
 
 function formatNumber(value) {
@@ -712,6 +814,43 @@ function shortUrl(url = '') {
 function companyMark(company = '') {
   const clean = company.replace(/[^a-zA-Z]/g, '').toLowerCase();
   return clean ? clean.slice(0, 9) : 'data';
+}
+
+function salaryRangeParams(value) {
+  if (value === '0-8000') return { max_salary: '8000' };
+  if (value === '8000-15000') return { min_salary: '8000', max_salary: '15000' };
+  if (value === '15000+') return { min_salary: '15000' };
+  return {};
+}
+
+function periodRangeLabel(value) {
+  if (value === 'all') return 'Todo o historico';
+  return `Ultimos ${value} dias`;
+}
+
+function downloadJobsCsv(jobs) {
+  const headers = ['titulo', 'empresa', 'fonte', 'localizacao', 'senioridade', 'match', 'salario', 'publicado_em', 'url'];
+  const rows = jobs.map((job) => [
+    job.title,
+    job.company,
+    sourceLabel(job.source),
+    locationModeLabel(job.location_mode, job.location),
+    seniority(job),
+    `${matchPercent(job)}%`,
+    salaryLabel(job),
+    dateLabel(job.posted_at),
+    job.url
+  ]);
+  const csv = [headers, ...rows]
+    .map((row) => row.map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','))
+    .join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `vagas-datascrap-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 createRoot(document.getElementById('root')).render(<App />);

@@ -5,14 +5,16 @@ import hashlib
 import os
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, request
 
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
+ROOT_DIR = Path(__file__).resolve().parents[2]
+RAW_DIR = ROOT_DIR / "data" / "raw"
+PROCESSED_DIR = ROOT_DIR / "data" / "processed"
 DEFAULT_PATTERN = "vagas*.csv"
 
 TECH_KEYWORDS = [
@@ -48,7 +50,7 @@ app = Flask(__name__)
 def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = os.getenv("CORS_ORIGIN", "*")
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
 
@@ -61,6 +63,18 @@ def health():
             "jobs": len(jobs),
             "csv_pattern": os.getenv("JOBS_CSV_PATTERN", DEFAULT_PATTERN),
             "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+@app.post("/api/reload")
+def reload_jobs():
+    jobs = load_jobs()
+    return jsonify(
+        {
+            "status": "ok",
+            "jobs": len(jobs),
+            "reloaded_at": datetime.now(timezone.utc).isoformat(),
         }
     )
 
@@ -102,12 +116,14 @@ def filters():
     locations = sorted({job["location"] for job in jobs if job["location"]})
     companies = sorted({job["company"] for job in jobs if job["company"]})
     techs = sorted({tech for job in jobs for tech in job["matched_technologies"]})
+    seniorities = sorted({job["seniority"] for job in jobs if job["seniority"]})
     return jsonify(
         {
             "sources": sources,
             "locations": locations,
             "companies": companies,
             "technologies": techs,
+            "seniorities": seniorities,
             "location_modes": ["remote_brazil", "brasilia", "all"],
         }
     )
@@ -119,6 +135,7 @@ def insights():
     by_source = Counter(job["source"] or "desconhecida" for job in jobs)
     by_location_mode = Counter(job["location_mode"] for job in jobs)
     by_company = Counter(job["company"] for job in jobs if job["company"])
+    by_seniority = Counter(job["seniority"] for job in jobs if job["seniority"])
     by_day = Counter((job["posted_at"] or "")[:10] for job in jobs if job["posted_at"])
     by_tech = Counter(tech for job in jobs for tech in job["matched_technologies"])
 
@@ -149,6 +166,7 @@ def insights():
             "by_source": counter_items(by_source),
             "by_location_mode": counter_items(by_location_mode),
             "by_company": counter_items(by_company, limit=10),
+            "by_seniority": counter_items(by_seniority),
             "by_day": [{"date": key, "count": value} for key, value in sorted(by_day.items())],
             "by_technology": counter_items(by_tech, limit=15),
         }
@@ -157,7 +175,7 @@ def insights():
 
 def load_jobs() -> list[dict[str, Any]]:
     pattern = os.getenv("JOBS_CSV_PATTERN", DEFAULT_PATTERN)
-    files = sorted(ROOT_DIR.glob(pattern))
+    files = collect_data_files(pattern)
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -173,6 +191,20 @@ def load_jobs() -> list[dict[str, Any]]:
             rows.append(job)
 
     return rows
+
+
+def collect_data_files(pattern: str) -> list[Path]:
+    for base in [PROCESSED_DIR, RAW_DIR, ROOT_DIR]:
+        if not base.exists():
+            continue
+        candidates = [
+            path
+            for path in sorted(base.glob(pattern))
+            if path.is_file()
+        ]
+        if candidates:
+            return candidates
+    return []
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -215,6 +247,7 @@ def normalize_job(row: dict[str, str], source_file: str) -> dict[str, Any]:
         "matched_technologies": matched,
         "match_score": len(matched),
     }
+    job["seniority"] = seniority_label(search_text)
     return job
 
 
@@ -225,6 +258,12 @@ def apply_filters(jobs: list[dict[str, Any]], args) -> list[dict[str, Any]]:
     tech = normalize(args.get("tech", ""))
     location_filter = normalize(args.get("location_mode", ""))
     salary = normalize(args.get("salary", ""))
+    city = normalize(args.get("city", ""))
+    seniority = normalize(args.get("seniority", ""))
+    days = clamp_int(args.get("days"), default=0, minimum=0, maximum=3650)
+    min_salary = parse_float(args.get("min_salary"))
+    max_salary = parse_float(args.get("max_salary"))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days) if days else None
 
     filtered = []
     for job in jobs:
@@ -239,8 +278,20 @@ def apply_filters(jobs: list[dict[str, Any]], args) -> list[dict[str, Any]]:
             continue
         if location_filter and location_filter != "all" and location_filter != job["location_mode"]:
             continue
+        if city and city not in normalize(job["location"]):
+            continue
+        if seniority and seniority != "all" and seniority != normalize(job["seniority"]):
+            continue
         if salary == "with_salary" and not (job.get("salary_min") or job.get("salary_max")):
             continue
+        if min_salary is not None and not salary_overlaps(job, min_salary=min_salary, max_salary=None):
+            continue
+        if max_salary is not None and not salary_overlaps(job, min_salary=None, max_salary=max_salary):
+            continue
+        if cutoff:
+            posted = parse_date(job.get("posted_at"))
+            if not posted or posted < cutoff:
+                continue
         filtered.append(job)
     return filtered
 
@@ -268,6 +319,37 @@ def matched_technologies(text: str) -> list[str]:
     return sorted({tech for tech in TECH_KEYWORDS if normalize(tech) in normalized})
 
 
+def seniority_label(text: str) -> str:
+    normalized = searchable(text)
+    padded = f" {normalized} "
+    if any(term in padded for term in [" estagio ", " estagiario ", " intern ", " internship "]):
+        return "Estagio"
+    if any(term in padded for term in [" junior ", " jr ", " trainee "]):
+        return "Junior"
+    if any(term in padded for term in [" especialista ", " specialist ", " staff ", " principal "]):
+        return "Especialista"
+    if any(term in padded for term in [" senior ", " sr ", " lead "]):
+        return "Senior"
+    if any(term in padded for term in [" pleno ", " mid ", " pleno senior "]):
+        return "Pleno"
+    return "Nao informado"
+
+
+def salary_overlaps(job: dict[str, Any], min_salary: float | None, max_salary: float | None) -> bool:
+    salary_min = job.get("salary_min")
+    salary_max = job.get("salary_max")
+    values = [value for value in [salary_min, salary_max] if isinstance(value, (int, float)) and value > 0]
+    if not values:
+        return False
+    low = min(values)
+    high = max(values)
+    if min_salary is not None and high < min_salary:
+        return False
+    if max_salary is not None and low > max_salary:
+        return False
+    return True
+
+
 def is_remote(text: str) -> bool:
     return any(term in text for term in ["remote", "remoto", "home office", "work from home"])
 
@@ -292,6 +374,27 @@ def parse_float(value: Any) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def parse_date(value: Any) -> datetime | None:
+    text = clean(value)
+    if not text:
+        return None
+    candidates = [text, text.replace("Z", "+00:00")]
+    for candidate in candidates:
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text[:10], fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
 
 
 def clean(value: Any) -> str:

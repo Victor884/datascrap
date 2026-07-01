@@ -1,0 +1,112 @@
+                                      JOÃO VICTOR V. MATOS
+                          Engenheiro de Dados | Data Engineering, Pipelines & Automação
+    Brasília, DF • (61) 99996-2703 • joaovictor27032004udf@gmail.com • linkedin.com/in/joaomatosdev • github.com/Victor884
+
+
+
+ RESUMO PROFISSIONAL
+ Engenheiro de Dados com experiência nos setores financeiro e educacional, especializado em pipelines ETL/ELT, arquitetura
+ de Data Warehouses e Data Lakes, processamento distribuído e automação inteligente de fluxos. Domínio de IBM DataStage,
+ Apache Spark, PySpark e Databricks. Sólida prática em administração de bancos de dados (DBA): segurança, backup, alta
+ disponibilidade e otimização de performance. Experiente em automação com Python, n8n, Power Automate e Selenium, além
+ de integração de APIs REST, Webhooks e LLMs. Orientado à confiabilidade e qualidade dos dados — da ingestão à entrega de
+ valor para o negócio.
+
+ EXPERIÊNCIA PROFISSIONAL
+Engenheiro de Dados                                                            CNEC (Campanha Nacional de Escolas da
+                                                                               Comunidade) Fev 2026 – Presente
+ Brasília, DF — Engenharia de Dados & Administração de Banco de Dados
+ • Projeto e desenvolvo pipelines ETL/ELT robustos para integrar múltiplas fontes heterogêneas de dados, garantindo
+   rastreabilidade, idempotência e monitoramento de qualidade em cada etapa do fluxo.
+ • Implemento arquitetura de Data Warehouse e Data Lake com modelagem dimensional, assegurando escalabilidade para
+   grandes volumes e suporte a consultas analíticas de alta performance.
+ • Estabeleço processos de Data Quality — limpeza, normalização, validação e enriquecimento de dados brutos — preparando
+   bases confiáveis e documentadas para Analistas e Cientistas de Dados.
+ • Lido com cargas de Big Data, ajustando configurações de infraestrutura e estratégias de particionamento para garantir
+   throughput e latência adequados às demandas operacionais.
+ Funções adicionais de DBA:
+ • Administro controle de acesso baseado em perfis (RBAC), implemento criptografia em repouso e em trânsito, e garanto
+   conformidade com políticas internas de segurança e privacidade de dados.
+ • Mantenho rotinas automatizadas de backup incremental e full, com planos de recuperação a desastres testados e
+   documentados, assegurando RTO/RPO dentro dos requisitos do negócio.
+ • Monitoro continuamente a performance do SGBD, identificando gargalos, reescrevendo queries SQL ineficientes e ajustando
+   índices e planos de execução para máxima eficiência.
+ • Implemento estratégias de alta disponibilidade (HA) — failover, replicação e clustering — garantindo SLA de uptime e
+   minimizando impacto de falhas nos ambientes de dados críticos.
+
+Analista de Dados — Engenharia & Automação (Estágio)                           Banco do Brasil S.A. Dez 2022 – Mai 2026
+ Brasília, DF — Diretoria de Gestão da Cultura e de Pessoas — ETL, Pipelines & Automação
+ • Implementei e mantive pipelines ETL com IBM DataStage, integrando fontes heterogêneas do ambiente corporativo e
+   garantindo confiabilidade e rastreabilidade dos fluxos para relatórios executivos.
+ • Desenvolvi jobs de processamento distribuído com Apache Spark e PySpark para transformações complexas em grandes
+   volumes de dados, aplicando otimizações de particionamento e cache.
+ • Automatizei rotinas de ETL e geração de relatórios com Python (Pandas, PyAutoGUI) e Shell Script, eliminando processos
+   manuais e reduzindo tempo de execução em várias horas semanais.
+ • Construí fluxos de automação de processos de negócio com n8n e Power Automate, integrando Microsoft 365 (Outlook,
+   SharePoint, Teams) via Webhooks e APIs REST com autenticação OAuth 2.0.
+ • Implementei soluções de RPA com Selenium para extração de dados de sistemas legados sem API, com controle robusto de
+   exceções, retry automático e logging estruturado.
+ • Modelei e estruturei tabelas no IBM DB2, definindo esquemas relacionais, chaves de partição e otimizando queries SQL
+   críticas para cargas de alta frequência.
+ • Processei e transformei dados volumosos no Databricks com PySpark em ambiente de cluster distribuído, executando
+   análises de alta complexidade computacional.
+ • Integrei chamadas a LLMs via API em pipelines de automação para classificação e enriquecimento inteligente de dados não
+   estruturados.
+ • Atuei em ciclos ágeis (Scrum/Kanban), colaborando com times multidisciplinares na entrega contínua de soluções de dados.
+
+ PROJETOS
+ Pipeline ETL Climático + Automação com n8n
+ Coleta, transformação e alertas automatizados via API REST
+ • Construí pipeline ETL que extrai dados da OpenWeather API, processa JSON com Python/Pandas e persiste histórico em
+   CSV para consultas analíticas posteriores.
+ • Orquestrei o fluxo no n8n com lógica condicional e tratamento de falhas, disparando alertas via Webhook com base em
+   thresholds configuráveis.
+ • Tecnologias: n8n, Python, Pandas, Scikit-learn, Streamlit, REST API, JSON, Webhook.
+ Instagram Data Analysis — Pipeline Analítico
+ EDA com foco em engenharia e qualidade da camada de dados
+ • Estruturei pipeline completo de ingestão, limpeza e transformação de métricas de engajamento, garantindo qualidade e
+   consistência dos dados.
+ • Automatizei extração via Selenium em plataformas sem API pública, com normalização de JSON e tratamento robusto de
+   exceções.
+ • Identifiquei correlação de 0,85 entre visitas ao perfil e conversão de seguidores.
+ • Tecnologias: Python, Selenium, Pandas, NumPy, SciPy, Statsmodels, Matplotlib, Seaborn.
+ Análise Estatística de Dados Públicos
+ Pipeline orquestrado com testes estatísticos
+ • Orquestrei pipeline com Apache Airflow (DAGs), garantindo rastreabilidade e reexecução confiável de cada etapa de
+   transformação.
+ • Executei testes de hipótese e ANOVA com SciPy/Statsmodels.
+ • Tecnologias: Python, Apache Airflow, Pandas, SciPy, Statsmodels, GCP.
+
+ HABILIDADES TÉCNICAS
+
+Engenharia de Dados:                 IBM DataStage, Apache Spark, PySpark, Databricks, ETL/ELT, Apache Airflow, Kafka (básico),
+                                     Pipelines de Dados, Data Warehouse, Data Lake
+Administração de BD:                 Segurança & Permissões (RBAC), Backup & Recovery, Alta Disponibilidade, Monitoramento de
+                                     SGBD, Otimização de Queries, Failover & Replicação
+Automação & Integração:              n8n, Power Automate, Selenium (RPA), PyAutoGUI, REST APIs, Webhooks, OAuth 2.0, API
+                                     Keys, JSON
+Bancos de Dados:                     IBM DB2, MySQL, PostgreSQL, SQL avançado, Modelagem Relacional, Erwin Data Modeler,
+                                     NoSQL (básico)
+Linguagens & Scripts:                Python (Pandas, NumPy, Scikit-learn, PyAutoGUI), SQL, JavaScript, Node.js, Shell Script
+Cloud & Plataformas:                 GCP, Databricks, Docker, Apache Spark (cluster), SAS, Azure (básico)
+DevOps & Métodos:                    Git, GitHub, CI/CD (básico), Docker, Scrum, Kanban
+Visualização:                        Power BI, Spotfire Analytics, Matplotlib, Seaborn, Plotly, Streamlit
+IA & Agentes:                        Integração de LLMs via API, agentes de IA em pipelines de automação, prompt engineering
+
+
+ FORMAÇÃO ACADÊMICA
+ Bacharelado em Ciência da Computação                                                            Ago 2022 – Em andamento
+ Centro Universitário do Distrito Federal (UDF) · Brasília, DF
+
+
+ CERTIFICAÇÕES
+ • Academy Accreditation — Databricks Fundamentals · Databricks
+ • Foundations: Data, Data, Everywhere · Google
+ • SQL — Structured Query Language · FGV
+ • Microsoft Power BI para Business Intelligence e Data Science · Data Science Academy
+ • Santander Tech+ Back-End · Ada Tech / Santander
+ • Git e Versionamento · Ada Tech
+
+ IDIOMAS
+ Português: Nativo • Inglês: Técnico — leitura de documentação, APIs e especificações internacionais
+
