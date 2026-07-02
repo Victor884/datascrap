@@ -1,5 +1,6 @@
+﻿'use client';
+
 import React, { useEffect, useMemo, useState } from 'react';
-import { createRoot } from 'react-dom/client';
 import {
   ArrowUp,
   BriefcaseBusiness,
@@ -16,15 +17,16 @@ import {
   Link2,
   Loader2,
   MapPin,
+  Moon,
   Search,
   Settings,
   SlidersHorizontal,
-  Upload,
+  SunMedium,
   X
 } from 'lucide-react';
 import './styles.css';
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:5000';
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://127.0.0.1:5000';
 const DEFAULT_FILTERS = {
   query: '',
   source: 'all',
@@ -45,6 +47,8 @@ function useApiData(filters) {
   const [jobs, setJobs] = useState([]);
   const [total, setTotal] = useState(0);
   const [insights, setInsights] = useState(null);
+  const [storage, setStorage] = useState(null);
+  const [snapshot, setSnapshot] = useState(null);
   const [options, setOptions] = useState({ sources: [], technologies: [], companies: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -71,20 +75,26 @@ function useApiData(filters) {
         if (salaryRange.min_salary) params.set('min_salary', salaryRange.min_salary);
         if (salaryRange.max_salary) params.set('max_salary', salaryRange.max_salary);
 
-        const [jobsRes, insightsRes, filtersRes] = await Promise.all([
+        const [jobsRes, insightsRes, filtersRes, storageRes, snapshotRes] = await Promise.all([
           fetch(`${API_BASE}/api/jobs?${params}`, { signal: controller.signal }),
           fetch(`${API_BASE}/api/insights?${params}`, { signal: controller.signal }),
-          fetch(`${API_BASE}/api/filters`, { signal: controller.signal })
+          fetch(`${API_BASE}/api/filters`, { signal: controller.signal }),
+          fetch(`${API_BASE}/api/storage`, { signal: controller.signal }),
+          fetch(`${API_BASE}/api/snapshot`, { signal: controller.signal })
         ]);
-        if (!jobsRes.ok || !insightsRes.ok || !filtersRes.ok) {
+        if (!jobsRes.ok || !insightsRes.ok || !filtersRes.ok || !storageRes.ok || !snapshotRes.ok) {
           throw new Error('Falha ao conectar com a API Flask');
         }
         const jobsJson = await jobsRes.json();
         const insightsJson = await insightsRes.json();
         const filtersJson = await filtersRes.json();
+        const storageJson = await storageRes.json();
+        const snapshotJson = await snapshotRes.json();
         setJobs(jobsJson.items ?? []);
         setTotal(jobsJson.total ?? 0);
         setInsights(insightsJson);
+        setStorage(storageJson);
+        setSnapshot(snapshotJson.snapshot ?? null);
         setOptions(filtersJson);
       } catch (err) {
         if (err.name === 'AbortError') return;
@@ -92,6 +102,8 @@ function useApiData(filters) {
         setJobs([]);
         setTotal(0);
         setInsights(null);
+        setStorage(null);
+        setSnapshot(null);
         setOptions({ sources: [], technologies: [], companies: [] });
       } finally {
         setLoading(false);
@@ -101,17 +113,23 @@ function useApiData(filters) {
     return () => controller.abort();
   }, [filters]);
 
-  return { jobs, total, insights, options, loading, error };
+  return { jobs, total, insights, storage, snapshot, options, loading, error };
 }
 
-function App() {
+export default function DashboardApp() {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [view, setView] = useState('vagas');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [detailOpen, setDetailOpen] = useState(true);
   const [sourceExpanded, setSourceExpanded] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
-  const { jobs, total, insights, options, loading, error } = useApiData(filters);
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === 'undefined') return 'dark';
+    const stored = window.localStorage.getItem('datascrap-theme');
+    if (stored === 'dark' || stored === 'light') return stored;
+    return 'dark';
+  });
+  const { jobs, total, insights, storage, snapshot, options, loading, error } = useApiData(filters);
   const [selectedId, setSelectedId] = useState('');
   const selectedJob = useMemo(() => jobs.find((job) => job.id === selectedId) ?? jobs[0], [jobs, selectedId]);
 
@@ -121,30 +139,41 @@ function App() {
     }
   }, [jobs, selectedId]);
 
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('datascrap-theme', theme);
+    }
+  }, [theme]);
+
   const activeSources = insights?.sources_active ?? 0;
   const totalJobs = insights?.total_jobs ?? total;
   const patchFilters = (patch) => setFilters((current) => ({ ...current, ...patch, page: patch.page ?? 1 }));
-  const refreshData = async () => {
-    try {
-      await fetch(`${API_BASE}/api/reload`, { method: 'POST' });
-    } catch {
-      // A busca seguinte mostra o erro se a API estiver indisponivel.
-    } finally {
-      setFilters((current) => ({ ...current, refreshKey: current.refreshKey + 1 }));
-    }
-  };
-
   return (
-    <div className="app-shell">
-      <TopBar activeSources={activeSources} latest={latestCollectionLabel(insights?.by_day)} loading={loading} view={view} setView={setView} onRefresh={refreshData} statusOpen={statusOpen} setStatusOpen={setStatusOpen} total={totalJobs} error={error} />
+    <div className="app-shell" data-theme={theme}>
+      <TopBar
+        activeSources={activeSources}
+        latest={latestCollectionLabel(insights?.by_day)}
+        loading={loading}
+        view={view}
+        setView={setView}
+        jobs={jobs}
+        statusOpen={statusOpen}
+        setStatusOpen={setStatusOpen}
+        total={totalJobs}
+        error={error}
+        storage={storage}
+        snapshot={snapshot}
+        theme={theme}
+        setTheme={setTheme}
+      />
       <div className={`workspace ${!sidebarOpen ? 'sidebar-collapsed' : ''} ${!detailOpen ? 'detail-collapsed' : ''}`}>
         {sidebarOpen && <Sidebar filters={filters} setFilters={patchFilters} options={options} insights={insights} sourceExpanded={sourceExpanded} setSourceExpanded={setSourceExpanded} />}
         <main className="main-content">
-          {error && <div className="api-warning">API offline ou indisponivel. Inicie o Flask em http://127.0.0.1:5000 para carregar dados reais.</div>}
+          {error && <div className="api-warning">API offline ou indisponível. Inicie o Flask em http://127.0.0.1:5000 para carregar dados reais.</div>}
           <MetricGrid insights={insights} totalJobs={totalJobs} />
           <ChartGrid insights={insights} />
           {view === 'insights' ? (
-            <InsightsView insights={insights} jobs={jobs} />
+            <InsightsView insights={insights} jobs={jobs} snapshot={snapshot} />
           ) : (
             <JobsTable
               jobs={jobs}
@@ -167,7 +196,7 @@ function App() {
   );
 }
 
-function TopBar({ activeSources, latest, loading, view, setView, onRefresh, statusOpen, setStatusOpen, total, error }) {
+function TopBar({ activeSources, latest, loading, view, setView, statusOpen, setStatusOpen, total, error, storage, snapshot, theme, setTheme, jobs }) {
   return (
     <header className="topbar">
       <div className="brand-mark">
@@ -187,9 +216,9 @@ function TopBar({ activeSources, latest, loading, view, setView, onRefresh, stat
         <button className={`tab ${view === 'insights' ? 'active' : ''}`} onClick={() => setView('insights')}>Insights</button>
       </nav>
       <div className="top-actions">
-        <button className="action-button" onClick={onRefresh} disabled={loading}>
-          <Upload size={16} />
-          Atualizar agora
+        <button className="action-button" onClick={() => downloadJobsExcel(jobs)} disabled={loading}>
+          <Download size={16} />
+          Exportar Excel
         </button>
         <div className="status-pill">
           <Clock3 size={16} />
@@ -203,7 +232,11 @@ function TopBar({ activeSources, latest, loading, view, setView, onRefresh, stat
           <Database size={16} />
           Fontes ativas <strong>{activeSources}/10</strong>
         </div>
-        <button className="icon-button" aria-label="Configuracoes" onClick={() => setStatusOpen(!statusOpen)}>
+        <button className="theme-toggle" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-pressed={theme === 'dark'} aria-label="Alternar tema">
+          {theme === 'dark' ? <Moon size={16} /> : <SunMedium size={16} />}
+          <span className={`toggle ${theme === 'dark' ? 'on' : ''}`}><i /></span>
+        </button>
+        <button className="icon-button" aria-label="Configurações" onClick={() => setStatusOpen(!statusOpen)}>
           {loading ? <Loader2 className="spin" size={18} /> : <Settings size={18} />}
         </button>
         {statusOpen && (
@@ -212,6 +245,8 @@ function TopBar({ activeSources, latest, loading, view, setView, onRefresh, stat
             <span>{error ? 'Offline' : 'Online'}</span>
             <span>{formatNumber(total)} vagas filtradas</span>
             <span>Base: {API_BASE}</span>
+            <span>Storage: {storage?.source || 'â€”'}</span>
+            <span>Snapshot: {snapshot?.generated_at ? dateTimeLabel(snapshot.generated_at) : 'â€”'}</span>
           </div>
         )}
       </div>
@@ -257,12 +292,12 @@ function Sidebar({ filters, setFilters, options, insights, sourceExpanded, setSo
         <Label>Localizacao</Label>
         <NativeSelect value={filters.locationMode} onChange={(value) => setFilters({ locationMode: value })}>
           <option value="remote_brazil">Remoto Brasil</option>
-          <option value="brasilia">Brasilia presencial/hibrido</option>
+          <option value="brasilia">Brasília presencial/híbrido</option>
           <option value="all">Todas do Brasil mapeadas</option>
         </NativeSelect>
         <ToggleRow label="Incluir vagas presenciais" checked={filters.locationMode === 'all'} onClick={() => setFilters({ locationMode: filters.locationMode === 'all' ? 'remote_brazil' : 'all' })} />
         <div className="small-label">Cidade (opcional)</div>
-        <TextInput value={filters.city} placeholder="Ex.: Brasilia" onChange={(value) => setFilters({ city: value })} />
+        <TextInput value={filters.city} placeholder="Ex.: Brasília" onChange={(value) => setFilters({ city: value })} />
       </section>
 
       <section className="filter-section">
@@ -282,9 +317,8 @@ function Sidebar({ filters, setFilters, options, insights, sourceExpanded, setSo
               className={`tech-token ${filters.tech === tech ? 'selected' : ''}`}
               onClick={() => setFilters({ ...filters, tech: filters.tech === tech ? 'all' : tech })}
             >
-              {tech}
+              <span>{tech}</span>
               <small>{techCounts.get(tech) ?? 0}</small>
-              <X size={13} />
             </button>
           ))}
         </div>
@@ -296,7 +330,7 @@ function Sidebar({ filters, setFilters, options, insights, sourceExpanded, setSo
           <option value="7">Ultimos 7 dias</option>
           <option value="30">Ultimos 30 dias</option>
           <option value="90">Ultimos 90 dias</option>
-          <option value="all">Todo o historico</option>
+          <option value="all">Todo o histórico</option>
         </NativeSelect>
         <div className="date-range">
           <span>{periodRangeLabel(filters.period)}</span>
@@ -306,7 +340,7 @@ function Sidebar({ filters, setFilters, options, insights, sourceExpanded, setSo
 
       <section className="filter-section">
         <Label>Faixa salarial</Label>
-        <ToggleRow label="Somente com salario" checked={filters.salaryOnly} onClick={() => setFilters({ salaryOnly: !filters.salaryOnly })} />
+        <ToggleRow label="Somente com salário" checked={filters.salaryOnly} onClick={() => setFilters({ salaryOnly: !filters.salaryOnly })} />
         <NativeSelect value={filters.salaryRange} onChange={(value) => setFilters({ salaryRange: value, salaryOnly: value !== 'all' || filters.salaryOnly })}>
           <option value="all">Qualquer faixa</option>
           <option value="0-8000">Ate R$ 8 mil</option>
@@ -381,17 +415,17 @@ function ChipInput({ value }) {
   );
 }
 
-function MetricGrid({ insights, totalJobs }) {
+function MetricGrid({ insights, totalJobs, className = '' }) {
   const average = Math.round(((insights?.average_match ?? 0) / 6) * 100);
   const sources = insights?.sources_active ?? 0;
   const latest = latestCollectionLabel(insights?.by_day);
 
   return (
-    <section className="metric-grid">
+    <section className={`metric-grid ${className}`.trim()}>
       <MetricCard title="Vagas encontradas" value={formatNumber(totalJobs)} meta={`${formatNumber(insights?.remote_brazil_jobs ?? 0)} remotas Brasil`} />
-      <MetricCard title="Match médio" value={`${Number.isFinite(average) ? average : 0}%`} meta={`${insights?.average_match ?? 0} tecnologias por vaga`} />
-      <MetricCard title="Fontes ativas" value={`${sources} / 10`} accent={`${formatNumber(insights?.with_salary ?? 0)} com salario`} />
-      <MetricCard title="Última coleta" value={latest} meta={`${formatNumber(insights?.brasilia_jobs ?? 0)} vagas em Brasilia`} icon={<Clock3 size={16} />} />
+      <MetricCard title="Match médio" value={`${Number.isFinite(average) ? average : 0}%`} trend={`${formatNumber(insights?.strong_matches ?? 0)} matches fortes`} />
+      <MetricCard title="Fontes ativas" value={`${sources} / 10`} accent={`${percentLabel(sources, 10)} das fontes`} />
+      <MetricCard title="Última coleta" value={latest} meta={`${formatNumber(insights?.brasilia_jobs ?? 0)} vagas em Brasília`} icon={<Clock3 size={16} />} />
     </section>
   );
 }
@@ -408,18 +442,18 @@ function MetricCard({ title, value, trend, accent, meta, icon }) {
   );
 }
 
-function ChartGrid({ insights }) {
+function ChartGrid({ insights, className = '' }) {
   const dayData = insights?.by_day?.length ? insights.by_day : [];
   const sourceData = insights?.by_source?.length ? insights.by_source : [];
-  const techData = insights?.by_technology?.length ? insights.by_technology : [];
+  const matchData = insights?.match_distribution?.length ? insights.match_distribution : [];
 
   return (
-    <section className="chart-grid">
+    <section className={`chart-grid ${className}`.trim()}>
       <ChartCard title="Vagas por dia">
         <BarChart data={dayData.slice(-18).map((item) => ({ label: item.date?.slice(5) ?? '', value: item.count }))} />
       </ChartCard>
-      <ChartCard title="Match médio por tecnologia">
-        <LineChart data={techData.map((item, index) => ({ label: item.name, value: item.count + index + 2 }))} />
+      <ChartCard title="Match por volume de tecnologias">
+        <LineChart data={matchData.map((item, index) => ({ label: item.name, value: item.count + index }))} />
       </ChartCard>
       <ChartCard title="Vagas por fonte">
         <HorizontalBars data={sourceData.slice(0, 8)} />
@@ -482,16 +516,50 @@ function LineChart({ data }) {
   );
 }
 
-function HorizontalBars({ data }) {
-  if (!data.length) return <EmptyChart message="Sem dados por fonte" />;
+function HorizontalBars({ data, labelFormatter = sourceLabel }) {
+  if (!data.length) return <EmptyChart message="Sem dados para comparar" />;
   const max = Math.max(...data.map((item) => item.count), 1);
   return (
     <div className="hbars">
       {data.map((item) => (
         <div className="hbar-row" key={item.name}>
-          <span>{sourceLabel(item.name)}</span>
+          <span>{labelFormatter(item.name)}</span>
           <div><i style={{ width: `${(item.count / max) * 100}%` }} /></div>
-          <strong>{item.count}</strong>
+          <strong>{formatNumber(item.count)}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CoverageBars({ data }) {
+  if (!data.length) return <EmptyChart message="Sem cobertura calculada" />;
+  return (
+    <div className="coverage-bars">
+      {data.map((item) => (
+        <div className="coverage-row" key={item.name}>
+          <div>
+            <span>{item.name}</span>
+            <strong>{formatNumber(item.count)}</strong>
+          </div>
+          <meter min="0" max="100" value={item.rate} />
+          <em>{formatNumber(item.rate)}%</em>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function BucketBars({ data }) {
+  if (!data.length) return <EmptyChart message="Sem distribuicao de match" />;
+  const max = Math.max(...data.map((item) => item.count), 1);
+  return (
+    <div className="bucket-bars">
+      {data.map((item) => (
+        <div className="bucket" key={item.name}>
+          <div style={{ height: `${Math.max(12, (item.count / max) * 150)}px` }} />
+          <strong>{formatNumber(item.count)}</strong>
+          <span>{item.name} tech</span>
         </div>
       ))}
     </div>
@@ -526,7 +594,7 @@ function JobsTable({ jobs, total, selectedJob, onSelect, filters, setFilters, lo
           <option value="match_desc">Maior match</option>
           <option value="company_asc">Empresa</option>
         </select>
-        <button className="outline-button" onClick={() => downloadJobsCsv(jobs)}><Download size={16} /> Exportar</button>
+        <button className="outline-button" onClick={() => downloadJobsExcel(jobs)}><Download size={16} /> Exportar Excel</button>
         <button className="icon-button" onClick={onToggleSidebar} aria-label="Alternar filtros"><SlidersHorizontal size={17} /></button>
       </div>
       <div className="table-wrap">
@@ -563,7 +631,7 @@ function JobsTable({ jobs, total, selectedJob, onSelect, filters, setFilters, lo
               >
                 <td><span className={`row-check ${selectedJob?.id === job.id ? 'on' : ''}`}>{selectedJob?.id === job.id && <Check size={12} />}</span></td>
                 <td>{job.title}</td>
-                <td>{job.company || '—'}</td>
+                <td>{job.company || 'â€”'}</td>
                 <td><SourceMark source={job.source} /></td>
                 <td>{locationModeLabel(job.location_mode, job.location)}</td>
                 <td><span className="match-badge">{matchPercent(job)}%</span></td>
@@ -592,24 +660,49 @@ function JobsTable({ jobs, total, selectedJob, onSelect, filters, setFilters, lo
   );
 }
 
-function InsightsView({ insights, jobs }) {
+function InsightsView({ insights, jobs, snapshot }) {
+  const snapshotJobs = snapshot?.top_jobs?.length ? snapshot.top_jobs : [];
+  const rankedJobs = snapshotJobs.length ? snapshotJobs : jobs.slice().sort((a, b) => matchPercent(b) - matchPercent(a));
+  const salary = insights?.salary ?? {};
+
   return (
-    <section className="insights-panel">
-      <div className="insight-list">
-        <InsightCard title="Top empresas" items={insights?.by_company ?? []} empty="Sem empresas no filtro atual" />
-        <InsightCard title="Senioridade" items={insights?.by_seniority ?? []} empty="Sem senioridade mapeada" />
-        <InsightCard title="Tecnologias" items={insights?.by_technology ?? []} empty="Sem tecnologias no filtro atual" />
+    <section className="insights-panel improved">
+      <div className="insight-summary">
+        <article>
+          <span>Base filtrada</span>
+          <strong>{formatNumber(insights?.total_jobs ?? 0)}</strong>
+          <small>{formatNumber(insights?.strong_matches ?? 0)} vagas com match forte</small>
+        </article>
+        <article>
+          <span>Salário médio</span>
+          <strong>{salary.avg ? `${currency('BRL')} ${formatNumber(salary.avg)}` : 'Sem dados'}</strong>
+          <small>{percentLabel(insights?.with_salary, insights?.total_jobs)} com faixa salarial</small>
+        </article>
+        <article>
+          <span>Fontes</span>
+          <strong>{formatNumber(insights?.sources_active ?? 0)}</strong>
+          <small>{formatNumber(insights?.remote_brazil_jobs ?? 0)} remotas Brasil</small>
+        </article>
       </div>
-      <div className="insight-table">
-        <h3>Vagas com maior match</h3>
-        {jobs.slice().sort((a, b) => matchPercent(b) - matchPercent(a)).slice(0, 8).map((job) => (
-          <div className="insight-job" key={job.id}>
+
+      <div className="insight-grid-wide">
+        <InsightCard title="Tipo de vaga" items={insights?.by_role ?? []} empty="Sem cargos mapeados" />
+        <InsightCard title="Senioridade" items={insights?.by_seniority ?? []} empty="Sem senioridade mapeada" />
+        <InsightCard title="Tecnologias mais frequentes" items={insights?.by_technology ?? []} empty="Sem tecnologias no filtro atual" />
+        <InsightCard title="Faixas salariais" items={insights?.salary_distribution ?? []} empty="Sem salários mapeados" />
+      </div>
+
+      <div className="insight-table priority">
+        <h3>Fila de prioridade</h3>
+        <p>Ordenada pelo match com as tecnologias do curriculo; use para decidir onde aplicar primeiro.</p>
+        {rankedJobs.slice(0, 10).map((job) => (
+          <div className="insight-job priority-row" key={job.id}>
             <span>{job.title}</span>
-            <small>{job.company || 'Empresa nao informada'} - {sourceLabel(job.source)}</small>
+            <small>{job.company || 'Empresa nao informada'} - {sourceLabel(job.source)} - {salaryLabel(job)}</small>
             <strong>{matchPercent(job)}%</strong>
           </div>
         ))}
-        {!jobs.length && <div className="empty-chart">Sem vagas para gerar ranking.</div>}
+        {!rankedJobs.length && <div className="empty-chart">Sem vagas para gerar ranking.</div>}
       </div>
     </section>
   );
@@ -647,7 +740,7 @@ function DetailPanel({ job, onClose }) {
           <h1>{job.title}</h1>
           <p>{job.company || 'Empresa não informada'}</p>
         </div>
-        <div className="company-wordmark">{companyMark(job.company)}</div>
+        <div className="company-wordmark">{companyMark(job.company).slice(0, 4).toUpperCase()}</div>
       </div>
 
       <div className="source-id">
@@ -690,7 +783,7 @@ function DetailPanel({ job, onClose }) {
       <section className="detail-section">
         <h2>Descrição</h2>
         <p className="description">
-          Vaga coletada automaticamente pelo DataScrap. Use o link original para revisar requisitos completos, aplicar filtros de match e acompanhar novas oportunidades em dados.
+          {job.description || 'Vaga coletada automaticamente pelo DataScrap. Use o link original para revisar requisitos completos, aplicar filtros de match e acompanhar novas oportunidades em dados.'}
         </p>
       </section>
     </aside>
@@ -702,7 +795,7 @@ function DetailRow({ icon, label, value, trailing }) {
     <div className="detail-row">
       <span className="detail-icon">{icon}</span>
       <strong>{label}</strong>
-      <span className="detail-value">{value || '—'}</span>
+      <span className="detail-value">{value || 'â€”'}</span>
       {trailing && <em>{trailing}</em>}
     </div>
   );
@@ -745,7 +838,7 @@ function salaryLabel(job) {
     return `${currency(job.salary_currency)} ${formatNumber(job.salary_min)} - ${formatNumber(job.salary_max)}`;
   }
   if (job?.salary_min) return `${currency(job.salary_currency)} ${formatNumber(job.salary_min)}+`;
-  return '—';
+  return 'â€”';
 }
 
 function currency(value) {
@@ -781,19 +874,40 @@ function matchPercent(job) {
 }
 
 function dateLabel(value) {
-  if (!value) return '—';
+  if (!value) return 'â€”';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value.slice(0, 10);
   return date.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
 }
 
+function dateTimeLabel(value) {
+  if (!value) return 'â€”';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short', timeZone: 'UTC' });
+}
+
 function latestCollectionLabel(days = []) {
   const latest = days?.[days.length - 1]?.date;
-  return latest ? dateLabel(latest) : '—';
+  return latest ? dateLabel(latest) : 'â€”';
 }
 
 function countMap(items = []) {
   return new Map(items.map((item) => [item.name, item.count]));
+}
+
+function countActiveFilters(filters) {
+  return [
+    filters.query,
+    filters.source !== 'all',
+    filters.locationMode !== 'all',
+    filters.tech !== 'all',
+    filters.salaryOnly,
+    filters.salaryRange !== 'all',
+    filters.seniority !== 'all',
+    filters.city,
+    filters.period !== '30',
+  ].filter(Boolean).length;
 }
 
 function formatNumber(value) {
@@ -801,8 +915,14 @@ function formatNumber(value) {
   return new Intl.NumberFormat('pt-BR').format(number);
 }
 
+function percentLabel(part, total) {
+  const denominator = Number(total ?? 0);
+  if (!denominator) return '0%';
+  return `${Math.round((Number(part ?? 0) / denominator) * 100)}%`;
+}
+
 function shortUrl(url = '') {
-  if (!url) return '—';
+  if (!url) return 'â€”';
   try {
     const parsed = new URL(url);
     return `${parsed.hostname}${parsed.pathname.slice(0, 18)}...`;
@@ -824,12 +944,12 @@ function salaryRangeParams(value) {
 }
 
 function periodRangeLabel(value) {
-  if (value === 'all') return 'Todo o historico';
+  if (value === 'all') return 'Todo o histórico';
   return `Ultimos ${value} dias`;
 }
 
-function downloadJobsCsv(jobs) {
-  const headers = ['titulo', 'empresa', 'fonte', 'localizacao', 'senioridade', 'match', 'salario', 'publicado_em', 'url'];
+function downloadJobsExcel(jobs) {
+  const headers = ['título', 'empresa', 'fonte', 'localização', 'senioridade', 'match', 'salário', 'publicado_em', 'tecnologias', 'descrição', 'url'];
   const rows = jobs.map((job) => [
     job.title,
     job.company,
@@ -839,18 +959,38 @@ function downloadJobsCsv(jobs) {
     `${matchPercent(job)}%`,
     salaryLabel(job),
     dateLabel(job.posted_at),
+    job.matched_technologies?.join(', ') ?? '',
+    job.description ?? '',
     job.url
   ]);
-  const csv = [headers, ...rows]
-    .map((row) => row.map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','))
-    .join('\n');
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const table = `
+    <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
+      <head><meta charset="UTF-8" /></head>
+      <body>
+        <table>
+          <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
+          <tbody>
+            ${rows.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`).join('')}
+          </tbody>
+        </table>
+      </body>
+    </html>
+  `;
+  const blob = new Blob([table], { type: 'application/vnd.ms-excel;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `vagas-datascrap-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.download = `vagas-datascrap-${new Date().toISOString().slice(0, 10)}.xls`;
   link.click();
   URL.revokeObjectURL(url);
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+

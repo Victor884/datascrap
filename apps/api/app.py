@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
 import re
+import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,10 +15,32 @@ from flask import Flask, jsonify, request
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from packages.jobstore import (
+    DEFAULT_DB_PATH,
+    count_jobs as count_db_jobs,
+    count_search_jobs,
+    load_jobs as load_jobs_from_db,
+    search_jobs as search_jobs_from_db,
+)
+
 RAW_DIR = ROOT_DIR / "data" / "raw"
 PROCESSED_DIR = ROOT_DIR / "data" / "processed"
+SNAPSHOT_DIR = ROOT_DIR / "data" / "snapshots"
 DEFAULT_PATTERN = "vagas*.csv"
+DEFAULT_SNAPSHOT = SNAPSHOT_DIR / "jobs-snapshot.json"
+JOB_CACHE: dict[str, tuple[tuple[int, int], list[dict[str, Any]]]] = {}
+SNAPSHOT_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
 
+
+def resolve_db_path() -> Path:
+    return Path(os.getenv("JOBS_DB_PATH", str(DEFAULT_DB_PATH)))
+
+
+def resolve_snapshot_path() -> Path:
+    return Path(os.getenv("JOBS_SNAPSHOT_PATH", str(DEFAULT_SNAPSHOT)))
 TECH_KEYWORDS = [
     "python",
     "sql",
@@ -62,6 +86,7 @@ def health():
             "status": "ok",
             "jobs": len(jobs),
             "csv_pattern": os.getenv("JOBS_CSV_PATTERN", DEFAULT_PATTERN),
+            "storage": storage_summary(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -74,6 +99,7 @@ def reload_jobs():
         {
             "status": "ok",
             "jobs": len(jobs),
+            "storage": storage_summary(),
             "reloaded_at": datetime.now(timezone.utc).isoformat(),
         }
     )
@@ -129,6 +155,55 @@ def filters():
     )
 
 
+@app.get("/api/storage")
+def storage():
+    jobs = load_jobs()
+    summary = storage_summary()
+    return jsonify(
+        {
+            "status": "ok",
+            "jobs": len(jobs),
+            **summary,
+        }
+    )
+
+
+@app.get("/api/search")
+def search():
+    query = request.args.get("q", "").strip()
+    limit = clamp_int(request.args.get("limit"), default=25, minimum=1, maximum=100)
+    offset = clamp_int(request.args.get("offset"), default=0, minimum=0, maximum=10000)
+    filters = {
+        "source": request.args.get("source", ""),
+        "company": request.args.get("company", ""),
+        "location_mode": request.args.get("location_mode", ""),
+        "seniority": request.args.get("seniority", ""),
+    }
+    total = count_search_jobs(query, resolve_db_path(), filters=filters)
+    items = [normalize_job(row, row.get("source_file") or resolve_db_path().name) for row in search_jobs_from_db(query, resolve_db_path(), limit=limit, offset=offset, filters=filters)]
+    return jsonify(
+        {
+            "query": query,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "items": items,
+        }
+    )
+
+
+@app.get("/api/snapshot")
+def snapshot():
+    payload = load_snapshot()
+    return jsonify(
+        {
+            "status": "ok",
+            "storage": storage_summary(),
+            "snapshot": payload,
+        }
+    )
+
+
 @app.get("/api/insights")
 def insights():
     jobs = apply_filters(load_jobs(), request.args)
@@ -136,8 +211,11 @@ def insights():
     by_location_mode = Counter(job["location_mode"] for job in jobs)
     by_company = Counter(job["company"] for job in jobs if job["company"])
     by_seniority = Counter(job["seniority"] for job in jobs if job["seniority"])
+    by_role = Counter(job["role_type"] for job in jobs if job.get("role_type"))
     by_day = Counter((job["posted_at"] or "")[:10] for job in jobs if job["posted_at"])
     by_tech = Counter(tech for job in jobs for tech in job["matched_technologies"])
+    match_distribution = Counter(match_bucket(job["match_score"]) for job in jobs)
+    salary_distribution = Counter(salary_bucket(job) for job in jobs)
 
     salaries = [
         value
@@ -145,6 +223,12 @@ def insights():
         for value in [job.get("salary_min"), job.get("salary_max")]
         if isinstance(value, (int, float)) and value > 0
     ]
+    with_salary = sum(1 for job in jobs if job.get("salary_min") or job.get("salary_max"))
+    with_company = sum(1 for job in jobs if job.get("company"))
+    with_date = sum(1 for job in jobs if job.get("posted_at"))
+    with_url = sum(1 for job in jobs if job.get("url"))
+    with_tech = sum(1 for job in jobs if job.get("matched_technologies"))
+    strong_matches = sum(1 for job in jobs if job.get("match_score", 0) >= 3)
 
     return jsonify(
         {
@@ -152,7 +236,8 @@ def insights():
             "sources_active": len(by_source),
             "remote_brazil_jobs": by_location_mode.get("remote_brazil", 0),
             "brasilia_jobs": by_location_mode.get("brasilia", 0),
-            "with_salary": sum(1 for job in jobs if job.get("salary_min") or job.get("salary_max")),
+            "with_salary": with_salary,
+            "strong_matches": strong_matches,
             "average_match": round(
                 sum(len(job["matched_technologies"]) for job in jobs) / len(jobs), 2
             )
@@ -167,13 +252,28 @@ def insights():
             "by_location_mode": counter_items(by_location_mode),
             "by_company": counter_items(by_company, limit=10),
             "by_seniority": counter_items(by_seniority),
+            "by_role": counter_items(by_role),
             "by_day": [{"date": key, "count": value} for key, value in sorted(by_day.items())],
             "by_technology": counter_items(by_tech, limit=15),
+            "match_distribution": ordered_bucket_items(match_distribution, ["0", "1", "2", "3", "4+"]),
+            "salary_distribution": ordered_bucket_items(salary_distribution, ["Sem salário", "Até 8k", "8k-15k", "15k+"]),
+            "data_coverage": [
+                {"name": "Empresa", "count": with_company, "rate": percent(with_company, len(jobs))},
+                {"name": "Link", "count": with_url, "rate": percent(with_url, len(jobs))},
+                {"name": "Data", "count": with_date, "rate": percent(with_date, len(jobs))},
+                {"name": "Tecnologias", "count": with_tech, "rate": percent(with_tech, len(jobs))},
+                {"name": "Salário", "count": with_salary, "rate": percent(with_salary, len(jobs))},
+            ],
         }
     )
 
 
 def load_jobs() -> list[dict[str, Any]]:
+    db_path = resolve_db_path()
+    db_jobs = cached_db_jobs(db_path)
+    if db_jobs:
+        return db_jobs
+
     pattern = os.getenv("JOBS_CSV_PATTERN", DEFAULT_PATTERN)
     files = collect_data_files(pattern)
     rows: list[dict[str, Any]] = []
@@ -193,6 +293,48 @@ def load_jobs() -> list[dict[str, Any]]:
     return rows
 
 
+def cached_db_jobs(db_path: Path) -> list[dict[str, Any]]:
+    signature = file_signature(db_path)
+    cache_key = str(db_path)
+    cached = JOB_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        return cached[1]
+
+    db_rows = load_jobs_from_db(db_path)
+    jobs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in db_rows:
+        job = normalize_job(row, row.get("source_file") or db_path.name)
+        key = (job.get("url") or "").lower() or f"{job['source']}|{job['title']}|{job['company']}".lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        jobs.append(job)
+
+    JOB_CACHE[cache_key] = (signature, jobs)
+    return jobs
+
+
+def load_snapshot() -> dict[str, Any]:
+    path = resolve_snapshot_path()
+    signature = file_signature(path)
+    cache_key = str(path)
+    cached = SNAPSHOT_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        return cached[1]
+
+    if path.exists():
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    else:
+        payload = build_snapshot(load_jobs(), path)
+
+    SNAPSHOT_CACHE[cache_key] = (signature, payload)
+    return payload
+
+
+
+
 def collect_data_files(pattern: str) -> list[Path]:
     for base in [PROCESSED_DIR, RAW_DIR, ROOT_DIR]:
         if not base.exists():
@@ -205,6 +347,76 @@ def collect_data_files(pattern: str) -> list[Path]:
         if candidates:
             return candidates
     return []
+
+
+def file_signature(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return (0, 0)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def build_snapshot(jobs: list[dict[str, Any]], output_path: Path | None = None) -> dict[str, Any]:
+    by_source = Counter(job["source"] or "desconhecida" for job in jobs)
+    by_location_mode = Counter(job["location_mode"] for job in jobs)
+    by_company = Counter(job["company"] for job in jobs if job["company"])
+    by_seniority = Counter(job["seniority"] for job in jobs if job["seniority"])
+    by_day = Counter((job["posted_at"] or "")[:10] for job in jobs if job["posted_at"])
+    by_tech = Counter(tech for job in jobs for tech in job["matched_technologies"])
+
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total_jobs": len(jobs),
+        "sources_active": len(by_source),
+        "remote_brazil_jobs": by_location_mode.get("remote_brazil", 0),
+        "brasilia_jobs": by_location_mode.get("brasilia", 0),
+        "with_salary": sum(1 for job in jobs if job.get("salary_min") or job.get("salary_max")),
+        "average_match": round(sum(len(job["matched_technologies"]) for job in jobs) / len(jobs), 2) if jobs else 0,
+        "by_source": counter_items(by_source),
+        "by_location_mode": counter_items(by_location_mode),
+        "by_company": counter_items(by_company, limit=10),
+        "by_seniority": counter_items(by_seniority),
+        "by_day": [{"date": key, "count": value} for key, value in sorted(by_day.items())],
+        "by_technology": counter_items(by_tech, limit=15),
+        "top_jobs": [
+            {
+                "id": job["id"],
+                "title": job["title"],
+                "company": job["company"],
+                "location": job["location"],
+                "match_score": job["match_score"],
+                "source": job["source"],
+            }
+            for job in sorted(jobs, key=lambda item: (item["match_score"], item["posted_at"]), reverse=True)[:10]
+        ],
+    }
+
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+
+    return payload
+
+
+def storage_summary() -> dict[str, Any]:
+    csv_pattern = os.getenv("JOBS_CSV_PATTERN", DEFAULT_PATTERN)
+    csv_files = collect_data_files(csv_pattern)
+    db_path = resolve_db_path()
+    snapshot_path = resolve_snapshot_path()
+    db_jobs = count_db_jobs(db_path)
+    source = "database" if db_jobs else ("csv" if csv_files else "empty")
+    return {
+        "source": source,
+        "database_path": str(db_path),
+        "database_jobs": db_jobs,
+        "snapshot_path": str(snapshot_path),
+        "snapshot_exists": snapshot_path.exists(),
+        "csv_pattern": csv_pattern,
+        "csv_files": [path.name for path in csv_files],
+    }
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -225,7 +437,8 @@ def normalize_job(row: dict[str, str], source_file: str) -> dict[str, Any]:
     url = clean(row.get("url"))
     tags = clean(row.get("tags"))
     posted_at = clean(row.get("posted_at"))
-    search_text = " ".join([title, company, location, tags, url])
+    description = clean(first_present(row, "description", "job_description", "jobDescription", "descricao"))
+    search_text = " ".join([title, description, company, location, tags, url])
     matched = matched_technologies(search_text)
 
     job = {
@@ -233,6 +446,7 @@ def normalize_job(row: dict[str, str], source_file: str) -> dict[str, Any]:
         "source": source,
         "source_file": source_file,
         "title": title,
+        "description": description,
         "company": company,
         "company_logo": clean(row.get("company_logo")),
         "location": location,
@@ -248,6 +462,7 @@ def normalize_job(row: dict[str, str], source_file: str) -> dict[str, Any]:
         "match_score": len(matched),
     }
     job["seniority"] = seniority_label(search_text)
+    job["role_type"] = role_type(search_text)
     return job
 
 
@@ -267,7 +482,7 @@ def apply_filters(jobs: list[dict[str, Any]], args) -> list[dict[str, Any]]:
 
     filtered = []
     for job in jobs:
-        text = normalize(" ".join([job["title"], job["company"], job["location"], " ".join(job["tags"])]))
+        text = normalize(" ".join([job["title"], job.get("description", ""), job["company"], job["location"], " ".join(job["tags"])]))
         if q and q not in text:
             continue
         if source and source != normalize(job["source"]):
@@ -335,6 +550,50 @@ def seniority_label(text: str) -> str:
     return "Nao informado"
 
 
+def role_type(text: str) -> str:
+    normalized = searchable(text)
+    padded = f" {normalized} "
+    if any(term in padded for term in [" engenheiro de dados ", " data engineer ", " engenharia de dados "]):
+        return "Engenharia de Dados"
+    if any(term in padded for term in [" analista de dados ", " data analyst ", " bi analyst ", " business intelligence "]):
+        return "Análise de Dados"
+    if any(term in padded for term in [" desenvolvedor python ", " python developer ", " backend python "]):
+        return "Desenvolvimento Python"
+    if any(term in padded for term in [" cientista de dados ", " data scientist ", " machine learning "]):
+        return "Ciência de Dados"
+    return "Outros"
+
+
+def match_bucket(score: Any) -> str:
+    try:
+        value = int(score)
+    except (TypeError, ValueError):
+        value = 0
+    if value >= 4:
+        return "4+"
+    return str(max(0, value))
+
+
+def salary_bucket(job: dict[str, Any]) -> str:
+    values = [
+        value
+        for value in [job.get("salary_min"), job.get("salary_max")]
+        if isinstance(value, (int, float)) and value > 0
+    ]
+    if not values:
+        return "Sem salário"
+    midpoint = sum(values) / len(values)
+    if midpoint < 8000:
+        return "Até 8k"
+    if midpoint < 15000:
+        return "8k-15k"
+    return "15k+"
+
+
+def percent(part: int, total: int) -> float:
+    return round((part / total) * 100, 1) if total else 0
+
+
 def salary_overlaps(job: dict[str, Any], min_salary: float | None, max_salary: float | None) -> bool:
     salary_min = job.get("salary_min")
     salary_max = job.get("salary_max")
@@ -364,6 +623,14 @@ def is_brazil_or_latam(text: str) -> bool:
 
 def split_tags(tags: str) -> list[str]:
     return [item.strip() for item in re.split(r"[|,]", tags or "") if item.strip()]
+
+
+def first_present(row: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        value = row.get(name)
+        if clean(value):
+            return value
+    return ""
 
 
 def parse_float(value: Any) -> float | None:
@@ -438,6 +705,10 @@ def stable_id(value: str) -> str:
 def counter_items(counter: Counter, limit: int | None = None) -> list[dict[str, Any]]:
     items = [{"name": key, "count": value} for key, value in counter.most_common(limit)]
     return items
+
+
+def ordered_bucket_items(counter: Counter, order: list[str]) -> list[dict[str, Any]]:
+    return [{"name": key, "count": counter.get(key, 0)} for key in order]
 
 
 def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:

@@ -1,3 +1,7 @@
-# Packages
+# Shared Packages
 
-Bibliotecas e utilitários compartilhados entre os componentes do monorepo.
+Utilitários compartilhados entre API, pipelines e futuras camadas do produto.
+
+## Módulos
+
+- `jobstore.py`: persistência SQLite, índice FTS e sincronização da base processada

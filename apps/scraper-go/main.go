@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 type Job struct {
 	Source         string   `json:"source"`
 	Title          string   `json:"title"`
+	Description    string   `json:"description,omitempty"`
 	Company        string   `json:"company"`
 	CompanyLogo    string   `json:"company_logo,omitempty"`
 	Location       string   `json:"location"`
@@ -306,6 +308,7 @@ func (JobicySource) Fetch(ctx context.Context, client *http.Client, query string
 			job := Job{
 				Source:         "jobicy",
 				Title:          strings.TrimSpace(item.JobTitle),
+				Description:    stripHTML(strings.Join([]string{item.JobExcerpt, item.JobDescription}, " ")),
 				Company:        strings.TrimSpace(item.CompanyName),
 				CompanyLogo:    strings.TrimSpace(item.CompanyLogo),
 				Location:       "Remote - " + strings.TrimSpace(item.JobGeo),
@@ -474,13 +477,14 @@ func (source AdzunaSource) Fetch(ctx context.Context, client *http.Client, query
 
 		for _, item := range payload.Results {
 			job := Job{
-				Source:   "adzuna",
-				Title:    strings.TrimSpace(item.Title),
-				Company:  strings.TrimSpace(item.Company.DisplayName),
-				Location: strings.TrimSpace(item.Location.DisplayName),
-				URL:      item.RedirectURL,
-				Tags:     cleanTags([]string{item.Category.Label}),
-				PostedAt: item.Created,
+				Source:      "adzuna",
+				Title:       strings.TrimSpace(item.Title),
+				Description: stripHTML(item.Description),
+				Company:     strings.TrimSpace(item.Company.DisplayName),
+				Location:    strings.TrimSpace(item.Location.DisplayName),
+				URL:         item.RedirectURL,
+				Tags:        cleanTags([]string{item.Category.Label}),
+				PostedAt:    item.Created,
 			}
 			if matchesTargetJobWithExtra(job, query, item.Description) {
 				allJobs = append(allJobs, job)
@@ -832,6 +836,40 @@ func normalizeText(text string) string {
 	return replacer.Replace(text)
 }
 
+func stripHTML(input string) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(input))
+
+	inTag := false
+
+	for _, char := range input {
+		switch char {
+		case '<':
+			inTag = true
+		case '>':
+			if inTag {
+				inTag = false
+				builder.WriteRune(' ')
+			}
+		default:
+			if !inTag {
+				builder.WriteRune(char)
+			}
+		}
+	}
+
+	cleaned := html.UnescapeString(builder.String())
+	cleaned = strings.ReplaceAll(cleaned, "\u00a0", " ")
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+
+	return cleaned
+}
+
 func cleanTags(tags []string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -882,6 +920,7 @@ func writeJobs(path string, format string, jobs []Job) error {
 		if err := writer.Write([]string{
 			"source",
 			"title",
+			"description",
 			"company",
 			"company_logo",
 			"location",
@@ -899,6 +938,7 @@ func writeJobs(path string, format string, jobs []Job) error {
 			if err := writer.Write([]string{
 				job.Source,
 				job.Title,
+				job.Description,
 				job.Company,
 				job.CompanyLogo,
 				job.Location,

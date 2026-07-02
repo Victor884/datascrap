@@ -47,6 +47,14 @@ jobs:
         run: |
           python pipelines/clean_jobs.py --input-dir data/raw --out data/processed/vagas-processadas.csv
 
+      - name: Sincronizar banco relacional
+        run: |
+          python pipelines/sync_jobs_db.py --input data/processed/vagas-processadas.csv --db data/warehouse/jobs.sqlite3
+
+      - name: Gerar snapshot analítico
+        run: |
+          python pipelines/build_snapshot.py --db data/warehouse/jobs.sqlite3 --out data/snapshots/jobs-snapshot.json
+
       - name: Publicar artefatos gerados
         uses: actions/upload-artifact@v4
         with:
@@ -54,3 +62,5 @@ jobs:
           path: |
             data/raw/*.csv
             data/processed/*.csv
+            data/warehouse/*.sqlite3
+            data/snapshots/*.json

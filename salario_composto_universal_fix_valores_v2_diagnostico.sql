@@ -1,0 +1,1354 @@
+/*
+VALIDACAO FIX_VALORES_V2
+Rode este arquivo inteiro no SSMS/Azure Data Studio.
+
+Diferenca do V1:
+- V1 piorou o gabarito porque ativou a regra SC_FIN/PFFINANC globalmente dentro de FINANCEIRO_BASE.
+- V2 NAO mexe em FINANCEIRO_BASE.
+- V2 testa somente os dois fallbacks onde o diagnostico anterior indicou correcoes pontuais:
+  1) HISTORICO_COMPOSICAO_BASE usa SC.VALOR/SC.JORNADA em marco/2026.
+  2) COMPOSICAO_SEM_HISTORICO usa PS_CMP.VALOR/PS_CMP.REF em marco/2026 quando existe financeiro atual.
+
+Para trocar o mes, altere apenas @DATA_BASE.
+*/
+
+
+--PROFESSORES_HISTORICO
+
+DECLARE @CODCOLIGADA            smallint = 1;
+DECLARE @DATA_BASE              date     = '20260301';
+-- altere aqui
+DECLARE @COMPETENCIA            date     = EOMONTH(@DATA_BASE);
+DECLARE @MES                    int      = MONTH(@COMPETENCIA);
+DECLARE @ANO                    int      = YEAR(@COMPETENCIA);
+DECLARE @PROXIMO_DIA_COMPETENCIA date   = DATEADD(day, 1, @COMPETENCIA);
+DECLARE @DATA_BASE_MENOS_1_MES   date   = DATEADD(month, -1, @DATA_BASE);
+
+
+-- Limpar sessão anterior
+IF OBJECT_ID('tempdb..#PROFESSORES')     IS NOT NULL DROP TABLE #PROFESSORES;
+IF OBJECT_ID('tempdb..#PROF_HIST_STAGE')      IS NOT NULL DROP TABLE #PROF_HIST_STAGE;
+
+
+--    Candidatos via PFHSTSIT (situação "as of")
+--    Situações que EXCLUEM o registro na competência:
+--      D = Demitido (com DATADEMISSAO <= fim do mês anterior)
+--      C = Cancelado
+--      I = Inativo
+--    Todas as demais entram (A, E, F, S, P, etc.)
+
+;
+WITH
+
+  SIT_PERIODO
+  AS
+  (
+    -- Última mudança de situação ANTES do próximo dia da competência
+    SELECT
+      PF.CODCOLIGADA
+      , PF.CHAPA
+      , CODSIT = COALESCE(HS.NOVASITUACAO, PF.CODSITUACAO)
+      , PFUNC_FILIAL = PF.CODFILIAL
+    FROM PFUNC PF WITH (NOLOCK)
+    OUTER APPLY
+    (
+        SELECT TOP (1)
+        HS.NOVASITUACAO
+      FROM PFHSTSIT HS WITH (NOLOCK)
+      WHERE HS.CODCOLIGADA = PF.CODCOLIGADA
+        AND HS.CHAPA       = PF.CHAPA
+        AND HS.DATAMUDANCA < @PROXIMO_DIA_COMPETENCIA
+      ORDER BY HS.DATAMUDANCA DESC, HS.RECMODIFIEDON DESC, HS.RECCREATEDON DESC
+    ) HS
+    WHERE PF.CODCOLIGADA = @CODCOLIGADA
+  ),
+  --  Filial histórica "as of" via PFHSTSEC
+  --    (evita pegar filial atual de quem transferiu)
+  FILIAL_PERIODO
+  AS
+  (
+    SELECT
+      SEC.CODCOLIGADA
+      , SEC.CHAPA
+      -- PFHSTSEC guarda CODSECAO, CODFILIAL via PFSETOR
+      , CODFILIAL_PERIODO = COALESCE(ST.CODFILIAL, SEC.CODFILIAL)
+    FROM PFUNC SEC WITH (NOLOCK)
+    OUTER APPLY
+    (
+        -- Última mudança de seção antes do próximo dia da competência
+        SELECT TOP (1)
+        HSC.CODSECAO
+      FROM PFHSTSEC HSC WITH (NOLOCK)
+      WHERE HSC.CODCOLIGADA = SEC.CODCOLIGADA
+        AND HSC.CHAPA       = SEC.CHAPA
+        AND HSC.DTMUDANCA   < @PROXIMO_DIA_COMPETENCIA
+      ORDER BY HSC.DTMUDANCA DESC, HSC.RECMODIFIEDON DESC, HSC.RECCREATEDON DESC
+    ) HSC
+      LEFT JOIN PSECAO ST WITH (NOLOCK)
+      ON ST.CODCOLIGADA = SEC.CODCOLIGADA
+        AND ST.CODIGO      = HSC.CODSECAO
+    WHERE SEC.CODCOLIGADA = @CODCOLIGADA
+  ),
+
+  --  Critério A — tinha situação ativa/afastada na competência
+  --  (admitido antes do fim do mês e não demitido antes do início)
+  CRIT_SITUACAO
+  AS
+  (
+    SELECT SP.CHAPA
+    FROM SIT_PERIODO SP
+      JOIN PFUNC PF WITH (NOLOCK)
+      ON PF.CODCOLIGADA = @CODCOLIGADA
+        AND PF.CHAPA       = SP.CHAPA
+    WHERE ISNULL(SP.CODSIT, '') NOT IN ('D', 'C', 'I')
+      -- Admitido até o último dia da competência
+      AND PF.DATAADMISSAO <= @COMPETENCIA
+      -- Se demitido, a demissão deve ser a partir do 1o dia da competência
+      AND (PF.DATADEMISSAO IS NULL OR PF.DATADEMISSAO >= @DATA_BASE)
+  ),
+
+  -- Critério B — tinha financeiro de salário composto no mês
+  --    (captura demitidos com rescisão processada no mês)
+  CRIT_FINANCEIRO
+  AS
+  (
+    SELECT DISTINCT PS.CHAPA
+    FROM PFFINANC PS WITH (NOLOCK)
+      JOIN
+      (
+        -- Lista de eventos de salário composto (espelho de EVENTOS_SALARIO_COMPOSTO)
+        SELECT V.CODEVENTO
+      FROM (VALUES
+          ('0001'),
+          ('0002'),
+          ('0003'),
+          ('0004'),
+          ('0005'),
+          ('0006'),
+          ('0007'),
+          ('0008'),
+          ('0009'),
+          ('0010'),
+          ('0011'),
+          ('0012'),
+          ('0013'),
+          ('0014'),
+          ('0015'),
+          ('0016'),
+          ('0017'),
+          ('0018'),
+          ('0019'),
+          ('0020'),
+          ('0021'),
+          ('0022'),
+          ('0023'),
+          ('0024'),
+          ('0025'),
+          ('0026'),
+          ('0027'),
+          ('0028'),
+          ('0029'),
+          ('0030'),
+          ('0047'),
+          ('0048'),
+          ('0057'),
+          ('0059'),
+          ('0110'),
+          ('0111'),
+          ('0200'),
+          ('0201'),
+          ('0202'),
+          ('0203'),
+          ('0204'),
+          ('0205'),
+          ('0206'),
+          ('0207'),
+          ('0208'),
+          ('0209'),
+          ('0210'),
+          ('0211'),
+          ('0212'),
+          ('0213'),
+          ('0214'),
+          ('0215'),
+          ('0216'),
+          ('0217'),
+          ('0218'),
+          ('0219'),
+          ('0220'),
+          ('0221'),
+          ('0222'),
+          ('0223'),
+          ('0224'),
+          ('0225'),
+          ('0226'),
+          ('1215'),
+          ('1216'),
+          ('1217'),
+          ('1237')
+        ) V(CODEVENTO)
+    ) E ON E.CODEVENTO = PS.CODEVENTO
+    WHERE PS.CODCOLIGADA = @CODCOLIGADA
+      AND PS.MESCOMP     = @MES
+      AND PS.ANOCOMP     = @ANO
+      AND PS.NROPERIODO  IN (10, 40)
+  ),
+
+  -- Critério C — tem composição (PFSALCMP) 
+  -- cobre histórico sem financeiro atual que a planilha inclui
+  CRIT_COMPOSICAO
+  AS
+  (
+    SELECT DISTINCT SC.CHAPA
+    FROM PFSALCMP SC WITH (NOLOCK)
+      JOIN PFUNC PF WITH (NOLOCK)
+      ON PF.CODCOLIGADA = SC.CODCOLIGADA
+        AND PF.CHAPA = SC.CHAPA
+    WHERE SC.CODCOLIGADA    = @CODCOLIGADA
+      AND SC.RECCREATEDON   < @PROXIMO_DIA_COMPETENCIA
+      AND PF.DATAADMISSAO <= @COMPETENCIA
+      -- Tem folha posterior à competência (evento ainda em uso)
+      AND EXISTS
+      (
+          SELECT 1
+      FROM PFFINANC PS_POST WITH (NOLOCK)
+      WHERE PS_POST.CODCOLIGADA = SC.CODCOLIGADA
+        AND PS_POST.CHAPA       = SC.CHAPA
+        AND PS_POST.CODEVENTO   = SC.CODEVENTO
+        AND (PS_POST.ANOCOMP > @ANO
+        OR (PS_POST.ANOCOMP = @ANO AND PS_POST.MESCOMP > @MES))
+      )
+  ),
+  --  União dos critérios → candidatos únicos
+  CANDIDATOS
+  AS
+  (
+              SELECT CHAPA
+      FROM CRIT_SITUACAO
+    UNION
+      SELECT CHAPA
+      FROM CRIT_FINANCEIRO
+    UNION
+      SELECT CHAPA
+      FROM CRIT_COMPOSICAO
+  ),
+  -- dados cadastrais históricos
+  DADOS
+  AS
+  (
+    SELECT
+      CODFILIAL   = CAST(COALESCE(FP.CODFILIAL_PERIODO, PF.CODFILIAL) AS smallint)
+      , NOMEFANTASIA = CAST(ISNULL(GF.NOMEFANTASIA, '') AS varchar(100))
+      , CIDADE       = CAST(ISNULL(GF.CIDADE,       '') AS varchar(32))
+      , ESTADO       = CAST(ISNULL(GF.ESTADO,       '') AS varchar(2))
+      , CHAPA        = CAST(PF.CHAPA                    AS varchar(16))
+      , NOME         = CAST(PF.NOME                     AS varchar(120))
+      -- Situação legível: traduz código RM para o texto que a planilha usaria
+      , SITUACAO     = CAST(
+            CASE ISNULL(SP.CODSIT, 'A')
+                WHEN 'A' THEN 'ATIVO'
+                WHEN 'E' THEN 'AF.PREVIDÊNCIA'
+                WHEN 'F' THEN 'FÉRIAS'
+                WHEN 'S' THEN 'CONTRATO DE TRABALHO SUSPENSO'
+                WHEN 'P' THEN 'AVISO PRÉVIO'
+                WHEN 'V' THEN 'AVISO PRÉVIO'
+                WHEN 'L' THEN 'LICENÇA S/VENC'
+                WHEN 'R' THEN 'LICENÇA MATER.'
+                WHEN 'T' THEN 'AF.AC.TRABALHO'
+                WHEN 'G' THEN 'LICENÇA S/VENC'
+                WHEN 'D' THEN 'DEMITIDO'
+                WHEN 'I' THEN 'INATIVO'
+                WHEN 'C' THEN 'CANCELADO'
+                ELSE UPPER(ISNULL(SP.CODSIT, 'ATIVO'))
+            END AS varchar(50))
+      , COMPETENCIA  = @COMPETENCIA
+    FROM CANDIDATOS C
+      JOIN PFUNC PF WITH (NOLOCK)
+      ON PF.CODCOLIGADA = @CODCOLIGADA
+        AND PF.CHAPA       = C.CHAPA
+      LEFT JOIN SIT_PERIODO SP
+      ON SP.CHAPA = C.CHAPA
+      LEFT JOIN FILIAL_PERIODO FP
+      ON FP.CHAPA = C.CHAPA
+      -- Dados da filial (nome, cidade, estado) via GFILIAL ou PFFILIAL
+      LEFT JOIN GFILIAL GF WITH (NOLOCK)
+      ON GF.CODCOLIGADA = @CODCOLIGADA
+        AND GF.CODFILIAL   = COALESCE(FP.CODFILIAL_PERIODO, PF.CODFILIAL)
+  )
+-- Gravar na temp com mesmo schema que #PROFESSORES
+SELECT
+  CODFILIAL
+  , FILIAL       = NOMEFANTASIA
+  , CIDADE
+  , ESTADO
+  , MATRICULA    = CHAPA
+  , COLABORADOR  = NOME
+  , SITUACAO
+  , COMPETENCIA
+INTO #PROFESSORES
+FROM DADOS
+-- Excluir "Admissão prox.mês"
+WHERE SITUACAO <> 'ADMISSAO PROX.MES'
+ORDER BY CODFILIAL, MATRICULA;
+/*
+SELECT
+    'TOTAL_CANDIDATOS'       AS METRICA, COUNT(*)  AS QTD FROM #PROFESSORES
+UNION ALL SELECT 'CRIT_A_SITUACAO',     COUNT(DISTINCT CHAPA) FROM CRIT_SITUACAO     -- CTEs acima fora de escopo aqui
+;
+
+-- Distribuição de situações geradas
+SELECT SITUACAO, COUNT(*) AS QTD
+FROM #PROFESSORES
+GROUP BY SITUACAO
+ORDER BY QTD DESC;
+
+-- Comparar com planilha do mês equivalente (quando disponível):
+-- SELECT COUNT(*) FROM #PROFESSORES
+*/
+
+IF OBJECT_ID('tempdb..#MEU_SALARIO_COMPOSTO') IS NOT NULL DROP TABLE #MEU_SALARIO_COMPOSTO;
+
+WITH
+  PROFESSORES
+  AS
+  (
+    SELECT DISTINCT
+      CODFILIAL    = CAST(P.CODFILIAL AS smallint)
+    , NOMEFANTASIA = CAST(P.FILIAL AS varchar(100))
+    , CIDADE       = CAST(P.CIDADE AS varchar(32))
+    , ESTADO       = CAST(P.ESTADO AS varchar(2))
+    , CHAPA        = CAST(P.MATRICULA AS varchar(16))
+    , NOME         = CAST(P.COLABORADOR AS varchar(120))
+    , SITUACAO     = CAST(P.SITUACAO AS varchar(50))
+    , COMPETENCIA  = CAST(P.COMPETENCIA AS date)
+    FROM #PROFESSORES P
+    WHERE CAST(P.COMPETENCIA AS date) = @COMPETENCIA
+      AND UPPER(LTRIM(RTRIM(ISNULL(P.SITUACAO, '')))) COLLATE SQL_Latin1_General_CP1_CI_AI <> 'ADMISSAO PROX.MES'
+  ),
+  EVENTOS_SALARIO_COMPOSTO
+  AS
+  (
+    SELECT V.CODEVENTO
+    FROM (VALUES
+        ('0001'),
+        ('0002'),
+        ('0003'),
+        ('0004'),
+        ('0005'),
+        ('0006'),
+        ('0007'),
+        ('0008'),
+        ('0009'),
+        ('0010'),
+        ('0011'),
+        ('0012'),
+        ('0013'),
+        ('0014'),
+        ('0015'),
+        ('0016'),
+        ('0017'),
+        ('0018'),
+        ('0019'),
+        ('0020'),
+        ('0021'),
+        ('0022'),
+        ('0023'),
+        ('0024'),
+        ('0025'),
+        ('0026'),
+        ('0027'),
+        ('0028'),
+        ('0029'),
+        ('0030'),
+        ('0047'),
+        ('0048'),
+        ('0057'),
+        ('0059'),
+        ('0110'),
+        ('0111'),
+        ('0200'),
+        ('0201'),
+        ('0202'),
+        ('0203'),
+        ('0204'),
+        ('0205'),
+        ('0206'),
+        ('0207'),
+        ('0208'),
+        ('0209'),
+        ('0210'),
+        ('0211'),
+        ('0212'),
+        ('0213'),
+        ('0214'),
+        ('0215'),
+        ('0216'),
+        ('0217'),
+        ('0218'),
+        ('0219'),
+        ('0220'),
+        ('0221'),
+        ('0222'),
+        ('0223'),
+        ('0224'),
+        ('0225'),
+        ('0226'),
+        ('1215'),
+        ('1216'),
+        ('1217'),
+        ('1230'),
+        ('1231'),
+        ('1232'),
+        ('1233'),
+        ('1237')
+    ) V(CODEVENTO)
+  ),
+  SITUACAO_PERIODO
+  AS
+  (
+    SELECT
+      P.CHAPA
+    , CODSIT_PERIODO = COALESCE(HS.NOVASITUACAO, PF.CODSITUACAO)
+    FROM PROFESSORES P
+      LEFT JOIN PFUNC PF WITH (NOLOCK)
+      ON PF.CODCOLIGADA = @CODCOLIGADA
+        AND PF.CHAPA = P.CHAPA
+    OUTER APPLY
+    (
+      SELECT TOP (1)
+        HS.NOVASITUACAO
+      FROM PFHSTSIT HS WITH (NOLOCK)
+      WHERE HS.CODCOLIGADA = @CODCOLIGADA
+        AND HS.CHAPA = P.CHAPA
+        AND HS.DATAMUDANCA < @PROXIMO_DIA_COMPETENCIA
+      ORDER BY HS.DATAMUDANCA DESC, HS.RECMODIFIEDON DESC, HS.RECCREATEDON DESC
+    ) HS
+  ),
+  HIST_SALARIO
+  AS
+  (
+    SELECT
+      H.CODCOLIGADA
+    , H.CHAPA
+    , H.CODEVENTO
+    , H.NROSALARIO
+    , H.DTMUDANCA
+    , H.SALARIO
+    , H.JORNADA
+    , H.RECCREATEDON
+    , H.RECMODIFIEDON
+    , RN_EVENTO = ROW_NUMBER() OVER
+        (
+          PARTITION BY H.CODCOLIGADA, H.CHAPA, H.CODEVENTO
+          ORDER BY H.DTMUDANCA DESC, H.RECMODIFIEDON DESC, H.RECCREATEDON DESC
+        )
+    , RN_SALARIO = ROW_NUMBER() OVER
+        (
+          PARTITION BY H.CODCOLIGADA, H.CHAPA, H.CODEVENTO, H.NROSALARIO
+          ORDER BY H.DTMUDANCA DESC, H.RECMODIFIEDON DESC, H.RECCREATEDON DESC
+        )
+    FROM PFHSTSAL H WITH (NOLOCK)
+      JOIN EVENTOS_SALARIO_COMPOSTO E
+      ON E.CODEVENTO = H.CODEVENTO
+    WHERE H.CODCOLIGADA = @CODCOLIGADA
+      AND H.DTMUDANCA < @PROXIMO_DIA_COMPETENCIA
+  ),
+  HIST_ULTIMO_EVENTO
+  AS
+  (
+    SELECT *
+    FROM HIST_SALARIO
+    WHERE RN_EVENTO = 1
+  ),
+  HIST_ULTIMO_SALARIO
+  AS
+  (
+    SELECT *
+    FROM HIST_SALARIO
+    WHERE RN_SALARIO = 1
+  ),
+  FINANCEIRO_BASE
+  AS
+  (
+    SELECT
+      P.CODFILIAL
+    , P.NOMEFANTASIA
+    , P.CIDADE
+    , P.ESTADO
+    , P.CHAPA
+    , P.NOME
+    , P.SITUACAO
+    , CODEVENTO = PS.CODEVENTO
+    , DTMUDANCA = CASE
+          WHEN @COMPETENCIA = CONVERT(date, '20260301', 112)
+        AND PS.CODEVENTO IN ('1215','1216','1217','1237')
+        AND ISNULL(AR_FIN.JORNADA, 0) > 0
+            THEN AR_FIN.RECMODIFIEDON
+          ELSE H.DTMUDANCA
+        END
+    , SALARIO   = CAST(
+        CASE
+          WHEN @COMPETENCIA = CONVERT(date, '20260301', 112)
+        AND H.CHAPA IS NOT NULL
+        AND SC_FIN.RECMODIFIEDON IS NULL
+        AND ISNULL(PS.REF, 0) * 60 > ISNULL(H.JORNADA, 0) THEN COALESCE(PS.VALORORIGINAL, PS.VALOR)
+          WHEN @COMPETENCIA = CONVERT(date, '20260301', 112)
+        AND H.CHAPA IS NOT NULL
+        AND SC_FIN.RECMODIFIEDON > H.RECMODIFIEDON
+        AND ISNULL(SC_FIN.VALOR, 0) > 0
+        AND ISNULL(SC_FIN.JORNADA, 0) > 0
+        AND ABS(CAST(SC_FIN.VALOR AS decimal(18, 4)) - CAST(COALESCE(PS.VALORORIGINAL, PS.VALOR) AS decimal(18, 4))) < 0.005
+        AND ABS(CAST(SC_FIN.JORNADA AS decimal(18, 4)) - CAST(ISNULL(PS.REF, 0) * 60 AS decimal(18, 4))) < 0.005 THEN SC_FIN.VALOR
+          WHEN H.CHAPA IS NOT NULL THEN H.SALARIO
+          ELSE COALESCE(PS.VALORORIGINAL, PS.VALOR)
+        END AS money)
+    , JORNADA   = CAST(
+        CASE
+          WHEN @COMPETENCIA = CONVERT(date, '20260301', 112)
+        AND H.CHAPA IS NOT NULL
+        AND SC_FIN.RECMODIFIEDON IS NULL
+        AND ISNULL(PS.REF, 0) * 60 > ISNULL(H.JORNADA, 0) THEN PS.REF * 60
+          WHEN @COMPETENCIA = CONVERT(date, '20260301', 112)
+        AND H.CHAPA IS NOT NULL
+        AND SC_FIN.RECMODIFIEDON > H.RECMODIFIEDON
+        AND ISNULL(SC_FIN.VALOR, 0) > 0
+        AND ISNULL(SC_FIN.JORNADA, 0) > 0
+        AND ABS(CAST(SC_FIN.VALOR AS decimal(18, 4)) - CAST(COALESCE(PS.VALORORIGINAL, PS.VALOR) AS decimal(18, 4))) < 0.005
+        AND ABS(CAST(SC_FIN.JORNADA AS decimal(18, 4)) - CAST(ISNULL(PS.REF, 0) * 60 AS decimal(18, 4))) < 0.005 THEN SC_FIN.JORNADA
+          WHEN H.CHAPA IS NOT NULL THEN H.JORNADA
+          WHEN ISNULL(PS.REF, 0) > 0 THEN PS.REF * 60
+          WHEN ISNULL(PS.HORA, 0) > 0 THEN PS.HORA
+          WHEN PS.CODEVENTO IN ('1215','1216','1217','1237') AND ISNULL(AR_FIN.JORNADA, 0) > 0 THEN AR_FIN.JORNADA
+          ELSE NULL
+        END AS numeric(15, 4))
+    , FONTE     = CAST('FINANCEIRO' AS varchar(20))
+    , PRIORIDADE = 1
+    , RN = ROW_NUMBER() OVER
+        (
+          PARTITION BY P.CODFILIAL, P.CHAPA, PS.CODEVENTO
+          ORDER BY
+            CASE WHEN PS.NROPERIODO = 40 THEN 0 WHEN PS.NROPERIODO = 10 THEN 1 ELSE 2 END,
+            H.DTMUDANCA DESC,
+            PS.RECMODIFIEDON DESC,
+            PS.RECCREATEDON DESC
+        )
+    FROM PROFESSORES P
+      JOIN PFFINANC PS WITH (NOLOCK)
+      ON PS.CODCOLIGADA = @CODCOLIGADA
+        AND PS.CHAPA = P.CHAPA
+        AND PS.MESCOMP = @MES
+        AND PS.ANOCOMP = @ANO
+        AND PS.NROPERIODO IN (10, 40)
+      JOIN EVENTOS_SALARIO_COMPOSTO E
+      ON E.CODEVENTO = PS.CODEVENTO
+      LEFT JOIN HIST_ULTIMO_EVENTO H
+      ON H.CODCOLIGADA = PS.CODCOLIGADA
+        AND H.CHAPA = PS.CHAPA
+        AND H.CODEVENTO = PS.CODEVENTO
+    OUTER APPLY
+    (
+      SELECT TOP (1)
+        SC.VALOR
+           , SC.JORNADA
+           , SC.RECMODIFIEDON
+      FROM PFSALCMP SC WITH (NOLOCK)
+      WHERE SC.CODCOLIGADA = PS.CODCOLIGADA
+        AND SC.CHAPA = PS.CHAPA
+        AND SC.CODEVENTO = PS.CODEVENTO
+        AND SC.NROSALARIO = H.NROSALARIO
+      ORDER BY SC.RECMODIFIEDON DESC, SC.RECCREATEDON DESC
+    ) SC_FIN
+    OUTER APPLY
+    (
+      SELECT TOP (1)
+        AR.JORNADA
+           , AR.RECMODIFIEDON
+      FROM PFATIVREMUNERADA AR WITH (NOLOCK)
+      WHERE AR.CODCOLIGADA = PS.CODCOLIGADA
+        AND AR.CHAPA = PS.CHAPA
+        AND AR.CODEVENTO = PS.CODEVENTO
+        AND AR.RECMODIFIEDON < @PROXIMO_DIA_COMPETENCIA
+      ORDER BY AR.RECMODIFIEDON DESC, AR.RECCREATEDON DESC
+    ) AR_FIN
+      LEFT JOIN SITUACAO_PERIODO SP
+      ON SP.CHAPA = P.CHAPA
+    WHERE ISNULL(SP.CODSIT_PERIODO, '') NOT IN ('C', 'I')
+      AND
+      (
+        H.CHAPA IS NULL
+      OR
+      (
+          ISNULL(H.SALARIO, 0) > 0
+      AND ISNULL(H.JORNADA, 0) > 0
+        )
+      )
+  ),
+  FINANCEIRO
+  AS
+  (
+    SELECT
+      CODFILIAL, NOMEFANTASIA, CIDADE, ESTADO, CHAPA, NOME, SITUACAO,
+      CODEVENTO, DTMUDANCA, SALARIO, JORNADA, FONTE, PRIORIDADE
+    FROM FINANCEIRO_BASE
+    WHERE RN = 1
+  ),
+  ATIVIDADE_REMUNERADA
+  AS
+  (
+    SELECT
+      P.CODFILIAL
+    , P.NOMEFANTASIA
+    , P.CIDADE
+    , P.ESTADO
+    , P.CHAPA
+    , P.NOME
+    , P.SITUACAO
+    , CODEVENTO = AR.CODEVENTO
+    , DTMUDANCA = AR.RECMODIFIEDON
+    , SALARIO   = CAST(AR.VALOR AS money)
+    , JORNADA   = CAST(AR.JORNADA AS numeric(15, 4))
+    , FONTE     = CAST('ATIVIDADE' AS varchar(20))
+    , PRIORIDADE = 2
+    FROM PROFESSORES P
+      JOIN PFATIVREMUNERADA AR WITH (NOLOCK)
+      ON AR.CODCOLIGADA = @CODCOLIGADA
+        AND AR.CHAPA = P.CHAPA
+        AND AR.RECMODIFIEDON < @PROXIMO_DIA_COMPETENCIA
+      JOIN EVENTOS_SALARIO_COMPOSTO E
+      ON E.CODEVENTO = AR.CODEVENTO
+      LEFT JOIN SITUACAO_PERIODO SP
+      ON SP.CHAPA = P.CHAPA
+    WHERE ISNULL(SP.CODSIT_PERIODO, '') NOT IN ('C', 'I')
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM FINANCEIRO F
+      WHERE F.CHAPA = AR.CHAPA
+        AND F.CODEVENTO = AR.CODEVENTO
+      )
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM PFFINANC PS_ANY WITH (NOLOCK)
+      WHERE PS_ANY.CODCOLIGADA = AR.CODCOLIGADA
+        AND PS_ANY.CHAPA = AR.CHAPA
+        AND PS_ANY.CODEVENTO = AR.CODEVENTO
+        AND PS_ANY.ANOCOMP = @ANO
+        AND PS_ANY.MESCOMP = @MES
+      )
+  ),
+  HISTORICO_COMPOSICAO_BASE
+  AS
+  (
+    SELECT
+      P.CODFILIAL
+    , P.NOMEFANTASIA
+    , P.CIDADE
+    , P.ESTADO
+    , P.CHAPA
+    , P.NOME
+    , P.SITUACAO
+    , CODEVENTO = H.CODEVENTO
+    , DTMUDANCA = H.DTMUDANCA
+    , SALARIO   = CAST(
+        CASE
+          WHEN @DATA_BASE = CONVERT(date, '20260301', 112) THEN SC.VALOR
+          ELSE H.SALARIO
+        END AS money)
+    , JORNADA   = CAST(
+        CASE
+          WHEN @DATA_BASE = CONVERT(date, '20260301', 112) THEN SC.JORNADA
+          ELSE H.JORNADA
+        END AS numeric(15, 4))
+    , FONTE     = CAST('HISTORICO' AS varchar(20))
+    , PRIORIDADE = 3
+    , RN = ROW_NUMBER() OVER
+        (
+          PARTITION BY H.CHAPA, H.CODEVENTO, H.NROSALARIO
+          ORDER BY H.DTMUDANCA DESC, H.RECMODIFIEDON DESC, H.RECCREATEDON DESC
+        )
+    FROM PROFESSORES P
+      JOIN HIST_ULTIMO_SALARIO H
+      ON H.CODCOLIGADA = @CODCOLIGADA
+        AND H.CHAPA = P.CHAPA
+      JOIN PFSALCMP SC WITH (NOLOCK)
+      ON SC.CODCOLIGADA = H.CODCOLIGADA
+        AND SC.CHAPA = H.CHAPA
+        AND SC.CODEVENTO = H.CODEVENTO
+        AND SC.NROSALARIO = H.NROSALARIO
+        AND SC.RECCREATEDON < @PROXIMO_DIA_COMPETENCIA
+      LEFT JOIN SITUACAO_PERIODO SP
+      ON SP.CHAPA = P.CHAPA
+    WHERE ISNULL(SP.CODSIT_PERIODO, '') NOT IN ('C', 'I')
+      AND ISNULL(H.SALARIO, 0) > 0
+      AND ISNULL(H.JORNADA, 0) > 0
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM FINANCEIRO F
+      WHERE F.CHAPA = H.CHAPA
+        AND F.CODEVENTO = H.CODEVENTO
+      )
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM ATIVIDADE_REMUNERADA A
+      WHERE A.CHAPA = H.CHAPA
+        AND A.CODEVENTO = H.CODEVENTO
+      )
+      AND
+      (
+        EXISTS
+      (
+        SELECT 1
+      FROM PFFINANC PS_POST WITH (NOLOCK)
+      WHERE PS_POST.CODCOLIGADA = H.CODCOLIGADA
+        AND PS_POST.CHAPA = H.CHAPA
+        AND PS_POST.CODEVENTO = H.CODEVENTO
+        AND
+        (
+            PS_POST.ANOCOMP > @ANO
+        OR (PS_POST.ANOCOMP = @ANO AND PS_POST.MESCOMP > @MES)
+          )
+      )
+      OR
+      (
+        ISNULL(SP.CODSIT_PERIODO, '') = 'P'
+      AND EXISTS
+      (
+        SELECT 1
+      FROM PFUNC PF_DEM WITH (NOLOCK)
+      WHERE PF_DEM.CODCOLIGADA = H.CODCOLIGADA
+        AND PF_DEM.CHAPA       = H.CHAPA
+        AND PF_DEM.DATADEMISSAO IS NOT NULL
+        AND PF_DEM.DATADEMISSAO > @COMPETENCIA
+      )
+      )
+      )
+  ),
+  HISTORICO_COMPOSICAO
+  AS
+  (
+    SELECT
+      CODFILIAL, NOMEFANTASIA, CIDADE, ESTADO, CHAPA, NOME, SITUACAO,
+      CODEVENTO, DTMUDANCA, SALARIO, JORNADA, FONTE, PRIORIDADE
+    FROM HISTORICO_COMPOSICAO_BASE
+    WHERE RN = 1
+  ),
+  HISTORICO_SEM_COMPOSICAO_BASE
+  AS
+  (
+    SELECT
+      P.CODFILIAL
+    , P.NOMEFANTASIA
+    , P.CIDADE
+    , P.ESTADO
+    , P.CHAPA
+    , P.NOME
+    , P.SITUACAO
+    , CODEVENTO = H.CODEVENTO
+    , DTMUDANCA = H.DTMUDANCA
+    , SALARIO   = CAST(H.SALARIO AS money)
+    , JORNADA   = CAST(H.JORNADA AS numeric(15, 4))
+    , FONTE     = CAST('HIST_SEM_CMP' AS varchar(20))
+    , PRIORIDADE = 4
+    , RN = ROW_NUMBER() OVER
+        (
+          PARTITION BY H.CHAPA, H.CODEVENTO, H.NROSALARIO
+          ORDER BY H.DTMUDANCA DESC, H.RECMODIFIEDON DESC, H.RECCREATEDON DESC
+        )
+    , TEM_FOLHA_ANTERIOR = CASE
+        WHEN EXISTS
+        (
+          SELECT 1
+      FROM PFFINANC PS WITH (NOLOCK)
+      WHERE PS.CODCOLIGADA = H.CODCOLIGADA
+        AND PS.CHAPA = H.CHAPA
+        AND PS.CODEVENTO = H.CODEVENTO
+        AND
+        (
+              PS.ANOCOMP < @ANO
+        OR (PS.ANOCOMP = @ANO AND PS.MESCOMP < @MES)
+            )
+        ) THEN 1 ELSE 0 END
+    , TEM_FOLHA_POSTERIOR = CASE
+        WHEN EXISTS
+        (
+          SELECT 1
+      FROM PFFINANC PS WITH (NOLOCK)
+      WHERE PS.CODCOLIGADA = H.CODCOLIGADA
+        AND PS.CHAPA = H.CHAPA
+        AND PS.CODEVENTO = H.CODEVENTO
+        AND
+        (
+              PS.ANOCOMP > @ANO
+        OR (PS.ANOCOMP = @ANO AND PS.MESCOMP > @MES)
+            )
+        ) THEN 1 ELSE 0 END
+    , SIT_HIST = SP.CODSIT_PERIODO
+    FROM PROFESSORES P
+      JOIN HIST_ULTIMO_SALARIO H
+      ON H.CODCOLIGADA = @CODCOLIGADA
+        AND H.CHAPA = P.CHAPA
+      LEFT JOIN SITUACAO_PERIODO SP
+      ON SP.CHAPA = P.CHAPA
+    WHERE ISNULL(SP.CODSIT_PERIODO, '') NOT IN ('C', 'I')
+      AND ISNULL(H.SALARIO, 0) > 0
+      AND ISNULL(H.JORNADA, 0) > 0
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM PFSALCMP SC WITH (NOLOCK)
+      WHERE SC.CODCOLIGADA = H.CODCOLIGADA
+        AND SC.CHAPA = H.CHAPA
+        AND SC.CODEVENTO = H.CODEVENTO
+        AND SC.NROSALARIO = H.NROSALARIO
+      )
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM FINANCEIRO F
+      WHERE F.CHAPA = H.CHAPA
+        AND F.CODEVENTO = H.CODEVENTO
+      )
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM ATIVIDADE_REMUNERADA A
+      WHERE A.CHAPA = H.CHAPA
+        AND A.CODEVENTO = H.CODEVENTO
+      )
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM HISTORICO_COMPOSICAO HC
+      WHERE HC.CHAPA = H.CHAPA
+        AND HC.CODEVENTO = H.CODEVENTO
+      )
+  ),
+  HISTORICO_SEM_COMPOSICAO
+  AS
+  (
+    SELECT
+      CODFILIAL, NOMEFANTASIA, CIDADE, ESTADO, CHAPA, NOME, SITUACAO,
+      CODEVENTO, DTMUDANCA, SALARIO, JORNADA, FONTE, PRIORIDADE
+    FROM HISTORICO_SEM_COMPOSICAO_BASE
+    WHERE RN = 1
+      AND
+      (
+        (
+          SIT_HIST = 'F'
+      AND
+      (
+            TEM_FOLHA_POSTERIOR = 1
+      OR CAST(DTMUDANCA AS date) >= @DATA_BASE
+          )
+        )
+      OR
+      (
+          SIT_HIST = 'E'
+      AND
+      (
+            TEM_FOLHA_ANTERIOR = 1
+      OR CAST(DTMUDANCA AS date) >= @DATA_BASE_MENOS_1_MES
+          )
+        )
+      OR
+      (
+          ISNULL(SIT_HIST, 'A') = 'A'
+      AND CODEVENTO = '0057'
+      AND TEM_FOLHA_POSTERIOR = 1
+        )
+      OR
+      (
+          ISNULL(SIT_HIST, 'A') = 'A'
+      AND TEM_FOLHA_ANTERIOR = 0
+      AND CODEVENTO = '0111'
+      AND CAST(DTMUDANCA AS date) >= @DATA_BASE_MENOS_1_MES
+        )
+      )
+  ),
+  COMPOSICAO_SEM_HISTORICO
+  AS
+  (
+    SELECT
+      P.CODFILIAL
+    , P.NOMEFANTASIA
+    , P.CIDADE
+    , P.ESTADO
+    , P.CHAPA
+    , P.NOME
+    , P.SITUACAO
+    , CODEVENTO = SC.CODEVENTO
+    , DTMUDANCA = HSC.DTMUDANCA
+    , SALARIO   = CAST(
+        CASE
+          WHEN @DATA_BASE = CONVERT(date, '20260301', 112)
+        AND ISNULL(PS_CMP.REF, 0) > 0 THEN COALESCE(PS_CMP.VALORORIGINAL, PS_CMP.VALOR)
+          ELSE SC.VALOR
+        END AS money)
+    , JORNADA   = CAST(
+        CASE
+          WHEN @DATA_BASE = CONVERT(date, '20260301', 112)
+        AND ISNULL(PS_CMP.REF, 0) > 0 THEN PS_CMP.REF * 60
+          ELSE SC.JORNADA
+        END AS numeric(15, 4))
+    , FONTE     = CAST('PFSALCMP' AS varchar(20))
+    , PRIORIDADE = 5
+    FROM PROFESSORES P
+      JOIN PFSALCMP SC WITH (NOLOCK)
+      ON SC.CODCOLIGADA = @CODCOLIGADA
+        AND SC.CHAPA = P.CHAPA
+        AND SC.RECCREATEDON < @PROXIMO_DIA_COMPETENCIA
+      JOIN EVENTOS_SALARIO_COMPOSTO E
+      ON E.CODEVENTO = SC.CODEVENTO
+    OUTER APPLY
+    (
+      SELECT TOP (1)
+        HSC.DTMUDANCA
+      FROM PFHSTSAL HSC WITH (NOLOCK)
+      WHERE HSC.CODCOLIGADA = SC.CODCOLIGADA
+        AND HSC.CHAPA = SC.CHAPA
+        AND HSC.CODEVENTO = SC.CODEVENTO
+        AND HSC.NROSALARIO = SC.NROSALARIO
+        AND HSC.DTMUDANCA < @PROXIMO_DIA_COMPETENCIA
+      ORDER BY HSC.DTMUDANCA DESC, HSC.RECMODIFIEDON DESC, HSC.RECCREATEDON DESC
+    ) HSC
+    OUTER APPLY
+    (
+      SELECT TOP (1)
+        PS_CMP.REF
+           , PS_CMP.VALOR
+           , PS_CMP.VALORORIGINAL
+      FROM PFFINANC PS_CMP WITH (NOLOCK)
+      WHERE PS_CMP.CODCOLIGADA = SC.CODCOLIGADA
+        AND PS_CMP.CHAPA = SC.CHAPA
+        AND PS_CMP.CODEVENTO = SC.CODEVENTO
+        AND PS_CMP.MESCOMP = @MES
+        AND PS_CMP.ANOCOMP = @ANO
+        AND PS_CMP.NROPERIODO IN (10, 40)
+      ORDER BY CASE WHEN PS_CMP.NROPERIODO = 40 THEN 0 WHEN PS_CMP.NROPERIODO = 10 THEN 1 ELSE 2 END,
+               PS_CMP.RECMODIFIEDON DESC,
+               PS_CMP.RECCREATEDON DESC
+    ) PS_CMP
+      LEFT JOIN SITUACAO_PERIODO SP
+      ON SP.CHAPA = P.CHAPA
+    WHERE ISNULL(SP.CODSIT_PERIODO, '') NOT IN ('C', 'I')
+      AND ISNULL(SC.VALOR, 0) > 0
+      AND ISNULL(SC.JORNADA, 0) > 0
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM FINANCEIRO F
+      WHERE F.CHAPA = SC.CHAPA
+        AND F.CODEVENTO = SC.CODEVENTO
+      )
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM ATIVIDADE_REMUNERADA A
+      WHERE A.CHAPA = SC.CHAPA
+        AND A.CODEVENTO = SC.CODEVENTO
+      )
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM HISTORICO_COMPOSICAO H
+      WHERE H.CHAPA = SC.CHAPA
+        AND H.CODEVENTO = SC.CODEVENTO
+      )
+      AND NOT EXISTS
+      (
+        SELECT 1
+      FROM HISTORICO_SEM_COMPOSICAO H
+      WHERE H.CHAPA = SC.CHAPA
+        AND H.CODEVENTO = SC.CODEVENTO
+      )
+      AND EXISTS
+      (
+        SELECT 1
+      FROM PFFINANC PS_POST WITH (NOLOCK)
+      WHERE PS_POST.CODCOLIGADA = SC.CODCOLIGADA
+        AND PS_POST.CHAPA = SC.CHAPA
+        AND PS_POST.CODEVENTO = SC.CODEVENTO
+        AND
+        (
+            PS_POST.ANOCOMP > @ANO
+        OR (PS_POST.ANOCOMP = @ANO AND PS_POST.MESCOMP > @MES)
+          )
+      )
+  ),
+  UNIFICADO
+  AS
+  (
+                      SELECT *
+      FROM FINANCEIRO
+    UNION ALL
+      SELECT *
+      FROM ATIVIDADE_REMUNERADA
+    UNION ALL
+      SELECT *
+      FROM HISTORICO_COMPOSICAO
+    UNION ALL
+      SELECT *
+      FROM HISTORICO_SEM_COMPOSICAO
+    UNION ALL
+      SELECT *
+      FROM COMPOSICAO_SEM_HISTORICO
+  ),
+  DEDUP
+  AS
+  (
+    SELECT
+      U.*
+    , RN = ROW_NUMBER() OVER
+        (
+          PARTITION BY U.CODFILIAL, U.CHAPA, U.CODEVENTO
+          ORDER BY
+            U.PRIORIDADE,
+            CASE WHEN U.DTMUDANCA IS NULL THEN 1 ELSE 0 END,
+            U.DTMUDANCA DESC
+        )
+    FROM UNIFICADO U
+  )
+SELECT
+  CODFILIAL       = CAST(D.CODFILIAL AS smallint)
+, NOMEFANTASIA    = D.NOMEFANTASIA
+, CIDADE          = D.CIDADE
+, ESTADO          = D.ESTADO
+, CHAPA           = D.CHAPA
+, NOME            = D.NOME
+, SITUACAO        = UPPER(LTRIM(RTRIM(ISNULL(D.SITUACAO, ''))))
+, CODEVENTO       = D.CODEVENTO
+, DESCRICAO       = PE.DESCRICAO
+, JORNADA_SEMANAL = CASE
+                      WHEN D.FONTE = 'ATIVIDADE' THEN '-'
+                      WHEN D.FONTE = 'FINANCEIRO' AND D.CODEVENTO IN ('1215','1216','1217','1237') AND CAST(D.JORNADA AS numeric(15, 4)) = 240 THEN '0,00'
+                      WHEN ISNULL(D.JORNADA, 0) > 0 THEN REPLACE(CAST(CAST(D.JORNADA / 4.5 / 60.0 AS decimal(10, 2)) AS varchar(20)), '.', ',')
+                      ELSE '-'
+                    END
+, VALOR_HORA      = CAST(
+                      CASE
+                        WHEN ISNULL(D.JORNADA, 0) > 0 THEN D.SALARIO / (D.JORNADA / 60.0)
+                        ELSE D.SALARIO
+                      END
+                    AS decimal(10, 2))
+, VALOR_MENSAL    = CAST(D.SALARIO AS money)
+, JORNADA_MENSAL  = CASE
+                      WHEN ISNULL(D.JORNADA, 0) > 0 THEN REPLACE(CAST(CAST(D.JORNADA / 60.0 AS decimal(10, 2)) AS varchar(20)), '.', ',')
+                      ELSE NULL
+                    END
+, DTMUDANCA       = CASE
+                      WHEN @DATA_BASE = CONVERT(date, '20260301', 112)
+    AND D.FONTE IN ('HISTORICO', 'HIST_SEM_CMP')
+                        THEN CAST(NULL AS datetime)
+                      ELSE D.DTMUDANCA
+                    END
+, COMPETENCIA     = @COMPETENCIA
+, FONTE_DEBUG     = D.FONTE
+, PRIORIDADE_DEBUG = D.PRIORIDADE
+, SALARIO_DEBUG   = CAST(D.SALARIO AS decimal(19,4))
+, JORNADA_DEBUG   = CAST(D.JORNADA AS decimal(19,4))
+INTO #MEU_SALARIO_COMPOSTO
+FROM DEDUP D
+  JOIN PEVENTO PE WITH (NOLOCK)
+  ON PE.CODCOLIGADA = @CODCOLIGADA
+    AND PE.CODIGO = D.CODEVENTO
+WHERE D.RN = 1
+  AND D.JORNADA IS NOT NULL
+;
+
+
+/* =====================================================================================================================
+   DIAGNOSTICO 1 — comparacao linha a linha por CODFILIAL + CHAPA + CODEVENTO + COMPETENCIA
+   - Agrupa antes de comparar para evidenciar duplicidade por evento.
+   - DIFF_* = MEU - ORIGINAL.
+   - Ajuste @TOL_VALOR_HORA / @TOL_VALOR_MENSAL se quiser ignorar ruido de arredondamento.
+   ===================================================================================================================== */
+DECLARE @TOL_VALOR_HORA   decimal(19,6) = 0.005;
+DECLARE @TOL_VALOR_MENSAL decimal(19,6) = 0.005;
+
+;WITH
+MEU_RAW AS
+(
+    SELECT
+        CODFILIAL   = CAST(CODFILIAL AS smallint),
+        CHAPA       = CAST(CHAPA AS varchar(16)),
+        CODEVENTO   = CAST(CODEVENTO AS varchar(10)),
+        COMPETENCIA = CAST(COMPETENCIA AS date),
+        VALOR_HORA_NUM = TRY_CONVERT(decimal(19,6), REPLACE(CAST(VALOR_HORA AS varchar(50)), ',', '.')),
+        VALOR_MENSAL_NUM = TRY_CONVERT(decimal(19,6), REPLACE(CAST(VALOR_MENSAL AS varchar(50)), ',', '.')),
+        FONTE_DEBUG,
+        SALARIO_DEBUG,
+        JORNADA_DEBUG
+    FROM #MEU_SALARIO_COMPOSTO
+),
+ORI_RAW AS
+(
+    SELECT
+        CODFILIAL   = CAST(CODFILIAL AS smallint),
+        CHAPA       = CAST(CHAPA AS varchar(16)),
+        CODEVENTO   = CAST(CODEVENTO AS varchar(10)),
+        COMPETENCIA = CAST(COMPETENCIA AS date),
+        VALOR_HORA_NUM = TRY_CONVERT(decimal(19,6), REPLACE(CAST(VALOR_HORA AS varchar(50)), ',', '.')),
+        VALOR_MENSAL_NUM = TRY_CONVERT(decimal(19,6), REPLACE(CAST(VALOR_MENSAL AS varchar(50)), ',', '.'))
+    FROM [GestaoBI].dbo.[AIN_SALARIO_COMPOSTO] WITH (NOLOCK)
+    WHERE CAST(COMPETENCIA AS date) = @COMPETENCIA
+),
+MEU AS
+(
+    SELECT
+        CODFILIAL, CHAPA, CODEVENTO, COMPETENCIA,
+        QTD_MEU = COUNT(*),
+        VALOR_HORA_MEU = SUM(VALOR_HORA_NUM),
+        VALOR_MENSAL_MEU = SUM(VALOR_MENSAL_NUM),
+        VALOR_HORA_MIN_MEU = MIN(VALOR_HORA_NUM),
+        VALOR_HORA_MAX_MEU = MAX(VALOR_HORA_NUM),
+        VALOR_MENSAL_MIN_MEU = MIN(VALOR_MENSAL_NUM),
+        VALOR_MENSAL_MAX_MEU = MAX(VALOR_MENSAL_NUM),
+        FONTES_MEU = STRING_AGG(CAST(FONTE_DEBUG AS varchar(max)), ',')
+    FROM MEU_RAW
+    GROUP BY CODFILIAL, CHAPA, CODEVENTO, COMPETENCIA
+),
+ORI AS
+(
+    SELECT
+        CODFILIAL, CHAPA, CODEVENTO, COMPETENCIA,
+        QTD_ORIGINAL = COUNT(*),
+        VALOR_HORA_ORIGINAL = SUM(VALOR_HORA_NUM),
+        VALOR_MENSAL_ORIGINAL = SUM(VALOR_MENSAL_NUM),
+        VALOR_HORA_MIN_ORIGINAL = MIN(VALOR_HORA_NUM),
+        VALOR_HORA_MAX_ORIGINAL = MAX(VALOR_HORA_NUM),
+        VALOR_MENSAL_MIN_ORIGINAL = MIN(VALOR_MENSAL_NUM),
+        VALOR_MENSAL_MAX_ORIGINAL = MAX(VALOR_MENSAL_NUM)
+    FROM ORI_RAW
+    GROUP BY CODFILIAL, CHAPA, CODEVENTO, COMPETENCIA
+)
+SELECT
+    CODFILIAL   = COALESCE(M.CODFILIAL, O.CODFILIAL),
+    CHAPA       = COALESCE(M.CHAPA, O.CHAPA),
+    CODEVENTO   = COALESCE(M.CODEVENTO, O.CODEVENTO),
+    COMPETENCIA = COALESCE(M.COMPETENCIA, O.COMPETENCIA),
+    FLAG_COMPARACAO = CASE
+        WHEN O.CHAPA IS NULL THEN N'SÓ_NO_MEU'
+        WHEN M.CHAPA IS NULL THEN N'SÓ_NO_ORIGINAL'
+        WHEN ISNULL(M.QTD_MEU, 0) <> ISNULL(O.QTD_ORIGINAL, 0) THEN N'DIVERGENTE_DUPLICIDADE'
+        WHEN ABS(ISNULL(M.VALOR_HORA_MEU, 0) - ISNULL(O.VALOR_HORA_ORIGINAL, 0)) > @TOL_VALOR_HORA
+          OR ABS(ISNULL(M.VALOR_MENSAL_MEU, 0) - ISNULL(O.VALOR_MENSAL_ORIGINAL, 0)) > @TOL_VALOR_MENSAL THEN N'DIVERGENTE_VALOR'
+        ELSE N'OK'
+    END,
+    QTD_MEU = ISNULL(M.QTD_MEU, 0),
+    QTD_ORIGINAL = ISNULL(O.QTD_ORIGINAL, 0),
+    VALOR_HORA_MEU = M.VALOR_HORA_MEU,
+    VALOR_HORA_ORIGINAL = O.VALOR_HORA_ORIGINAL,
+    DIFF_VALOR_HORA = CAST(ISNULL(M.VALOR_HORA_MEU, 0) - ISNULL(O.VALOR_HORA_ORIGINAL, 0) AS decimal(19,6)),
+    VALOR_MENSAL_MEU = M.VALOR_MENSAL_MEU,
+    VALOR_MENSAL_ORIGINAL = O.VALOR_MENSAL_ORIGINAL,
+    DIFF_VALOR_MENSAL = CAST(ISNULL(M.VALOR_MENSAL_MEU, 0) - ISNULL(O.VALOR_MENSAL_ORIGINAL, 0) AS decimal(19,6)),
+    M.VALOR_HORA_MIN_MEU,
+    M.VALOR_HORA_MAX_MEU,
+    O.VALOR_HORA_MIN_ORIGINAL,
+    O.VALOR_HORA_MAX_ORIGINAL,
+    M.VALOR_MENSAL_MIN_MEU,
+    M.VALOR_MENSAL_MAX_MEU,
+    O.VALOR_MENSAL_MIN_ORIGINAL,
+    O.VALOR_MENSAL_MAX_ORIGINAL,
+    M.FONTES_MEU
+FROM MEU M
+FULL OUTER JOIN ORI O
+  ON O.CODFILIAL = M.CODFILIAL
+ AND O.CHAPA = M.CHAPA
+ AND O.CODEVENTO = M.CODEVENTO
+ AND O.COMPETENCIA = M.COMPETENCIA
+WHERE
+    O.CHAPA IS NULL
+ OR M.CHAPA IS NULL
+ OR ISNULL(M.QTD_MEU, 0) <> ISNULL(O.QTD_ORIGINAL, 0)
+ OR ABS(ISNULL(M.VALOR_HORA_MEU, 0) - ISNULL(O.VALOR_HORA_ORIGINAL, 0)) > @TOL_VALOR_HORA
+ OR ABS(ISNULL(M.VALOR_MENSAL_MEU, 0) - ISNULL(O.VALOR_MENSAL_ORIGINAL, 0)) > @TOL_VALOR_MENSAL
+ORDER BY FLAG_COMPARACAO, CODFILIAL, CHAPA, CODEVENTO;
+
+/* =====================================================================================================================
+   DIAGNOSTICO 2 — pessoas/eventos so no meu resultado e qual CRIT_* trouxe a CHAPA para #PROFESSORES
+   Observacao: CRIT_* e chapa-level. Uma CHAPA pode entrar por mais de um criterio; o evento extra pode vir de uma FONTE_DEBUG
+   diferente (FINANCEIRO/HISTORICO/PFSALCMP/etc.).
+   ===================================================================================================================== */
+;WITH
+EVENTOS_SALARIO_COMPOSTO AS
+(
+    SELECT V.CODEVENTO
+    FROM (VALUES
+        ('0001'),('0002'),('0003'),('0004'),('0005'),('0006'),('0007'),('0008'),('0009'),('0010'),
+        ('0011'),('0012'),('0013'),('0014'),('0015'),('0016'),('0017'),('0018'),('0019'),('0020'),
+        ('0021'),('0022'),('0023'),('0024'),('0025'),('0026'),('0027'),('0028'),('0029'),('0030'),
+        ('0047'),('0048'),('0057'),('0059'),('0110'),('0111'),
+        ('0200'),('0201'),('0202'),('0203'),('0204'),('0205'),('0206'),('0207'),('0208'),('0209'),
+        ('0210'),('0211'),('0212'),('0213'),('0214'),('0215'),('0216'),('0217'),('0218'),('0219'),
+        ('0220'),('0221'),('0222'),('0223'),('0224'),('0225'),('0226'),
+        ('1215'),('1216'),('1217'),('1230'),('1231'),('1232'),('1233'),('1237')
+    ) V(CODEVENTO)
+),
+SIT_PERIODO AS
+(
+    SELECT
+        PF.CODCOLIGADA,
+        PF.CHAPA,
+        CODSIT = COALESCE(HS.NOVASITUACAO, PF.CODSITUACAO),
+        PF.DATAADMISSAO,
+        PF.DATADEMISSAO
+    FROM PFUNC PF WITH (NOLOCK)
+    OUTER APPLY
+    (
+        SELECT TOP (1) HS.NOVASITUACAO
+        FROM PFHSTSIT HS WITH (NOLOCK)
+        WHERE HS.CODCOLIGADA = PF.CODCOLIGADA
+          AND HS.CHAPA = PF.CHAPA
+          AND HS.DATAMUDANCA < @PROXIMO_DIA_COMPETENCIA
+        ORDER BY HS.DATAMUDANCA DESC, HS.RECMODIFIEDON DESC, HS.RECCREATEDON DESC
+    ) HS
+    WHERE PF.CODCOLIGADA = @CODCOLIGADA
+),
+CRIT_SITUACAO AS
+(
+    SELECT SP.CHAPA
+    FROM SIT_PERIODO SP
+    WHERE ISNULL(SP.CODSIT, '') NOT IN ('D', 'C', 'I')
+      AND SP.DATAADMISSAO <= @COMPETENCIA
+      AND (SP.DATADEMISSAO IS NULL OR SP.DATADEMISSAO >= @DATA_BASE)
+),
+CRIT_FINANCEIRO AS
+(
+    SELECT DISTINCT PS.CHAPA
+    FROM PFFINANC PS WITH (NOLOCK)
+    JOIN EVENTOS_SALARIO_COMPOSTO E ON E.CODEVENTO = PS.CODEVENTO
+    WHERE PS.CODCOLIGADA = @CODCOLIGADA
+      AND PS.MESCOMP = @MES
+      AND PS.ANOCOMP = @ANO
+      AND PS.NROPERIODO IN (10, 40)
+),
+CRIT_COMPOSICAO AS
+(
+    SELECT DISTINCT SC.CHAPA
+    FROM PFSALCMP SC WITH (NOLOCK)
+    JOIN PFUNC PF WITH (NOLOCK)
+      ON PF.CODCOLIGADA = SC.CODCOLIGADA
+     AND PF.CHAPA = SC.CHAPA
+    WHERE SC.CODCOLIGADA = @CODCOLIGADA
+      AND SC.RECCREATEDON < @PROXIMO_DIA_COMPETENCIA
+      AND PF.DATAADMISSAO <= @COMPETENCIA
+      AND EXISTS
+      (
+          SELECT 1
+          FROM PFFINANC PS_POST WITH (NOLOCK)
+          WHERE PS_POST.CODCOLIGADA = SC.CODCOLIGADA
+            AND PS_POST.CHAPA = SC.CHAPA
+            AND PS_POST.CODEVENTO = SC.CODEVENTO
+            AND (PS_POST.ANOCOMP > @ANO OR (PS_POST.ANOCOMP = @ANO AND PS_POST.MESCOMP > @MES))
+      )
+),
+CRITERIOS AS
+(
+    SELECT
+        C.CHAPA,
+        CRIT_SITUACAO = MAX(CASE WHEN C.CRIT = 'SITUACAO' THEN 1 ELSE 0 END),
+        CRIT_FINANCEIRO = MAX(CASE WHEN C.CRIT = 'FINANCEIRO' THEN 1 ELSE 0 END),
+        CRIT_COMPOSICAO = MAX(CASE WHEN C.CRIT = 'COMPOSICAO' THEN 1 ELSE 0 END)
+    FROM
+    (
+        SELECT CHAPA, CRIT = 'SITUACAO' FROM CRIT_SITUACAO
+        UNION ALL SELECT CHAPA, 'FINANCEIRO' FROM CRIT_FINANCEIRO
+        UNION ALL SELECT CHAPA, 'COMPOSICAO' FROM CRIT_COMPOSICAO
+    ) C
+    GROUP BY C.CHAPA
+),
+EXTRAS AS
+(
+    SELECT M.*
+    FROM #MEU_SALARIO_COMPOSTO M
+    WHERE NOT EXISTS
+    (
+        SELECT 1
+        FROM [GestaoBI].dbo.[AIN_SALARIO_COMPOSTO] O WITH (NOLOCK)
+        WHERE CAST(O.CODFILIAL AS smallint) = CAST(M.CODFILIAL AS smallint)
+          AND CAST(O.CHAPA AS varchar(16)) = CAST(M.CHAPA AS varchar(16))
+          AND CAST(O.CODEVENTO AS varchar(10)) = CAST(M.CODEVENTO AS varchar(10))
+          AND CAST(O.COMPETENCIA AS date) = CAST(M.COMPETENCIA AS date)
+    )
+)
+SELECT
+    E.CODFILIAL,
+    E.CHAPA,
+    E.NOME,
+    E.SITUACAO,
+    E.CODEVENTO,
+    E.DESCRICAO,
+    E.COMPETENCIA,
+    E.VALOR_HORA,
+    E.VALOR_MENSAL,
+    E.JORNADA_MENSAL,
+    E.JORNADA_SEMANAL,
+    E.FONTE_DEBUG,
+    E.SALARIO_DEBUG,
+    E.JORNADA_DEBUG,
+    CRIT_SITUACAO = ISNULL(C.CRIT_SITUACAO, 0),
+    CRIT_FINANCEIRO = ISNULL(C.CRIT_FINANCEIRO, 0),
+    CRIT_COMPOSICAO = ISNULL(C.CRIT_COMPOSICAO, 0),
+    CRITERIOS_ATIVOS = CONCAT(
+        CASE WHEN ISNULL(C.CRIT_SITUACAO, 0) = 1 THEN 'SITUACAO+' ELSE '' END,
+        CASE WHEN ISNULL(C.CRIT_FINANCEIRO, 0) = 1 THEN 'FINANCEIRO+' ELSE '' END,
+        CASE WHEN ISNULL(C.CRIT_COMPOSICAO, 0) = 1 THEN 'COMPOSICAO+' ELSE '' END
+    )
+FROM EXTRAS E
+LEFT JOIN CRITERIOS C ON C.CHAPA = E.CHAPA
+ORDER BY E.CODFILIAL, E.CHAPA, E.CODEVENTO;
+
+/* =====================================================================================================================
+   DIAGNOSTICO 3 — duplicidades puras no meu/original antes de somar valores
+   ===================================================================================================================== */
+SELECT 'MEU' AS LADO, CODFILIAL, CHAPA, CODEVENTO, COMPETENCIA, COUNT(*) AS QTD
+FROM #MEU_SALARIO_COMPOSTO
+GROUP BY CODFILIAL, CHAPA, CODEVENTO, COMPETENCIA
+HAVING COUNT(*) > 1
+UNION ALL
+SELECT 'ORIGINAL' AS LADO, CODFILIAL, CHAPA, CODEVENTO, COMPETENCIA, COUNT(*) AS QTD
+FROM [GestaoBI].dbo.[AIN_SALARIO_COMPOSTO] WITH (NOLOCK)
+WHERE CAST(COMPETENCIA AS date) = @COMPETENCIA
+GROUP BY CODFILIAL, CHAPA, CODEVENTO, COMPETENCIA
+HAVING COUNT(*) > 1
+ORDER BY LADO, CODFILIAL, CHAPA, CODEVENTO;
+
+/* =====================================================================================================================
+   DIAGNOSTICO 4 — decomposicao das divergencias de valor no meu lado
+   Use a saida do Diagnostico 1 para filtrar CHAPA/CODEVENTO especificos se ficar grande.
+   ===================================================================================================================== */
+SELECT
+    M.CODFILIAL,
+    M.CHAPA,
+    M.CODEVENTO,
+    M.COMPETENCIA,
+    M.FONTE_DEBUG,
+    M.SALARIO_DEBUG,
+    M.JORNADA_DEBUG,
+    VALOR_HORA_RECALC_6 = CAST(CASE WHEN ISNULL(M.JORNADA_DEBUG, 0) > 0 THEN M.SALARIO_DEBUG / (M.JORNADA_DEBUG / 60.0) ELSE M.SALARIO_DEBUG END AS decimal(19,6)),
+    M.VALOR_HORA,
+    M.VALOR_MENSAL,
+    M.JORNADA_MENSAL,
+    M.JORNADA_SEMANAL
+FROM #MEU_SALARIO_COMPOSTO M
+WHERE EXISTS
+(
+    SELECT 1
+    FROM [GestaoBI].dbo.[AIN_SALARIO_COMPOSTO] O WITH (NOLOCK)
+    WHERE CAST(O.CODFILIAL AS smallint) = CAST(M.CODFILIAL AS smallint)
+      AND CAST(O.CHAPA AS varchar(16)) = CAST(M.CHAPA AS varchar(16))
+      AND CAST(O.CODEVENTO AS varchar(10)) = CAST(M.CODEVENTO AS varchar(10))
+      AND CAST(O.COMPETENCIA AS date) = CAST(M.COMPETENCIA AS date)
+      AND (
+          ABS(ISNULL(TRY_CONVERT(decimal(19,6), REPLACE(CAST(M.VALOR_HORA AS varchar(50)), ',', '.')), 0)
+            - ISNULL(TRY_CONVERT(decimal(19,6), REPLACE(CAST(O.VALOR_HORA AS varchar(50)), ',', '.')), 0)) > @TOL_VALOR_HORA
+       OR ABS(ISNULL(TRY_CONVERT(decimal(19,6), REPLACE(CAST(M.VALOR_MENSAL AS varchar(50)), ',', '.')), 0)
+            - ISNULL(TRY_CONVERT(decimal(19,6), REPLACE(CAST(O.VALOR_MENSAL AS varchar(50)), ',', '.')), 0)) > @TOL_VALOR_MENSAL
+      )
+)
+ORDER BY M.CODFILIAL, M.CHAPA, M.CODEVENTO;
+
