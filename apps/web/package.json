@@ -4,17 +4,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5173",
-    "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 4173"
+    "dev": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.1.2",
-    "vite": "^7.3.0",
-    "typescript": "^5.9.3",
+    "next": "^15.5.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "lucide-react": "^0.561.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
 }

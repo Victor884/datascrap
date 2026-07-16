@@ -109,6 +109,7 @@ def to_datascrap_row(row):
     return {
         "source": clean_text(row_value(row, "site")),
         "title": clean_text(row_value(row, "title")),
+        "description": clean_text(row_value(row, "description")),
         "company": clean_text(row_value(row, "company")),
         "company_logo": "",
         "location": clean_text(row_value(row, "location")),
@@ -179,6 +180,7 @@ def main():
     fieldnames = [
         "source",
         "title",
+        "description",
         "company",
         "company_logo",
         "location",

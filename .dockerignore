@@ -1,0 +1,17 @@
+.git
+.gitignore
+node_modules
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.sqlite3
+**/*.db
+.hammer
+.mypy_cache
+.pytest_cache
+.venv
+.venv-*
+apps/web/node_modules
+apps/web/dist

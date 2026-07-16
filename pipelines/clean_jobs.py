@@ -196,6 +196,7 @@ def first_value(row: dict[str, str], *names: str) -> str:
 def normalize_row(row: dict[str, str], source_file: str) -> dict[str, Any]:
     source = first_value(row, "source", "site")
     title = first_value(row, "title", "jobTitle", "job_title")
+    description = first_value(row, "description", "jobDescription", "job_description", "descricao")
     company = first_value(row, "company", "companyName", "company_name")
     company_logo = first_value(row, "company_logo", "companyLogo", "company_logo_url")
     location = first_value(row, "location", "jobGeo", "location_name")
@@ -207,7 +208,7 @@ def normalize_row(row: dict[str, str], source_file: str) -> dict[str, Any]:
     salary_currency = first_value(row, "salary_currency", "currency")
     salary_period = first_value(row, "salary_period", "interval")
 
-    search_text = " ".join([title, company, location, " ".join(tags), url])
+    search_text = " ".join([title, description, company, location, " ".join(tags), url])
     technologies = matched_technologies(search_text)
     unique_key = url or f"{source}|{title}|{company}|{location}"
 
@@ -216,6 +217,7 @@ def normalize_row(row: dict[str, str], source_file: str) -> dict[str, Any]:
         "source": source,
         "source_file": source_file,
         "title": title,
+        "description": description,
         "company": company,
         "company_logo": company_logo,
         "location": location,
@@ -265,6 +267,7 @@ def clean_jobs(input_dir: Path, pattern: str, output: Path, include_tests: bool)
         "source",
         "source_file",
         "title",
+        "description",
         "company",
         "company_logo",
         "location",

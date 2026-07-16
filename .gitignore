@@ -4,10 +4,22 @@ __pycache__/
 *.pyc
 *.csv
 *.log
+data/warehouse/*.sqlite3
+data/warehouse/*.db
+data/snapshots/*.json
 
 apps/web/node_modules/
 apps/web/dist/
 apps/web/.vite/
+apps/web/.next/
+apps/web/src/.hermes-tmp.*
+
+apps/api/*.egg-info/
+.hermes/
+.design-audit/
+.cache/
+data/cache/
+data/profiles/
 
 *.exe
 *.dll
