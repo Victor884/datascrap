@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"html"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,6 +29,7 @@ type Job struct {
 	URL            string   `json:"url"`
 	Tags           []string `json:"tags,omitempty"`
 	PostedAt       string   `json:"posted_at,omitempty"`
+	CollectedAt    string   `json:"collected_at,omitempty"`
 	SalaryMin      float64  `json:"salary_min,omitempty"`
 	SalaryMax      float64  `json:"salary_max,omitempty"`
 	SalaryCurrency string   `json:"salary_currency,omitempty"`
@@ -37,17 +41,199 @@ type Source interface {
 	Fetch(ctx context.Context, client *http.Client, query string) ([]Job, error)
 }
 
+var publicSourceNames = []string{"remoteok", "arbeitnow", "remotive", "jobicy", "themuse"}
+
+var serpSites = map[string]string{
+	"linkedin":  "linkedin.com/jobs",
+	"indeed":    "br.indeed.com",
+	"glassdoor": "glassdoor.com.br",
+	"gupy":      "gupy.io",
+	"infojobs":  "infojobs.com.br",
+}
+
+func buildSources(input string) ([]Source, error) {
+	requested := splitCommaList(input)
+	if len(requested) == 0 {
+		return nil, fmt.Errorf("informe ao menos uma fonte")
+	}
+
+	expanded := make([]string, 0, len(requested))
+	for _, name := range requested {
+		switch name {
+		case "public":
+			expanded = append(expanded, publicSourceNames...)
+		case "all":
+			expanded = append(expanded, publicSourceNames...)
+			if os.Getenv("ADZUNA_APP_ID") != "" && os.Getenv("ADZUNA_APP_KEY") != "" {
+				expanded = append(expanded, "adzuna")
+			}
+			if os.Getenv("SERPAPI_KEY") != "" {
+				for name := range serpSites {
+					expanded = append(expanded, name)
+				}
+			}
+		default:
+			expanded = append(expanded, name)
+		}
+	}
+
+	var sources []Source
+	seen := map[string]bool{}
+	for _, name := range expanded {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+
+		switch name {
+		case "remoteok":
+			sources = append(sources, RemoteOKSource{})
+		case "arbeitnow":
+			sources = append(sources, ArbeitnowSource{})
+		case "remotive":
+			sources = append(sources, RemotiveSource{})
+		case "jobicy":
+			sources = append(sources, JobicySource{})
+		case "themuse":
+			sources = append(sources, TheMuseSource{})
+		case "adzuna":
+			appID, appKey := os.Getenv("ADZUNA_APP_ID"), os.Getenv("ADZUNA_APP_KEY")
+			if appID == "" || appKey == "" {
+				return nil, fmt.Errorf("adzuna exige ADZUNA_APP_ID e ADZUNA_APP_KEY")
+			}
+			sources = append(sources, AdzunaSource{AppID: appID, AppKey: appKey})
+		default:
+			site, ok := serpSites[name]
+			if !ok {
+				return nil, fmt.Errorf("fonte %q desconhecida; disponiveis: %s", name, strings.Join(availableSourceNames(), ", "))
+			}
+			apiKey := os.Getenv("SERPAPI_KEY")
+			if apiKey == "" {
+				return nil, fmt.Errorf("%s exige SERPAPI_KEY no ambiente ou no arquivo .env", name)
+			}
+			sources = append(sources, SerpAPISource{APIKey: apiKey, SourceName: name, Site: site})
+		}
+	}
+
+	return sources, nil
+}
+
+func splitCommaList(input string) []string {
+	seen := map[string]bool{}
+	var output []string
+	for _, value := range strings.Split(input, ",") {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		output = append(output, value)
+	}
+	return output
+}
+
+func availableSourceNames() []string {
+	names := append([]string{}, publicSourceNames...)
+	names = append(names, "adzuna")
+	for name := range serpSites {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sourceNames(sources []Source) []string {
+	names := make([]string, 0, len(sources))
+	for _, source := range sources {
+		names = append(names, source.Name())
+	}
+	return names
+}
+
+func loadEnvFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), "\"'")
+		if key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); !exists {
+			if err := os.Setenv(key, value); err != nil {
+				return err
+			}
+		}
+	}
+	return scanner.Err()
+}
+
+func newAPIRequest(ctx context.Context, endpoint string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "DataScrap/0.2 (+https://github.com/Victor884)")
+	req.Header.Set("Accept", "application/json, text/plain;q=0.9, */*;q=0.8")
+	req.Header.Set("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.7")
+	return req, nil
+}
+
+func jitterDelay(ctx context.Context, minimum time.Duration, maximum time.Duration) error {
+	if maximum <= minimum {
+		maximum = minimum
+	}
+	delay := minimum
+	if span := maximum - minimum; span > 0 {
+		random, err := rand.Int(rand.Reader, big.NewInt(int64(span)+1))
+		if err != nil {
+			return err
+		}
+		delay += time.Duration(random.Int64())
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 type RemoteOKSource struct{}
 
 func (RemoteOKSource) Name() string { return "remoteok" }
 
 func (RemoteOKSource) Fetch(ctx context.Context, client *http.Client, query string) ([]Job, error) {
 	endpoint := "https://remoteok.com/api"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := newAPIRequest(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "datascrap/0.1 (+https://github.com/local/datascrap)")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -103,11 +289,10 @@ func (ArbeitnowSource) Name() string { return "arbeitnow" }
 
 func (ArbeitnowSource) Fetch(ctx context.Context, client *http.Client, query string) ([]Job, error) {
 	endpoint := "https://www.arbeitnow.com/api/job-board-api"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := newAPIRequest(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "datascrap/0.1")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -174,7 +359,7 @@ func (RemotiveSource) Name() string { return "remotive" }
 
 func (RemotiveSource) Fetch(ctx context.Context, client *http.Client, query string) ([]Job, error) {
 	var allJobs []Job
-	for _, keyword := range queryKeywords(query) {
+	for _, keyword := range searchKeywords(query) {
 		jobs, err := fetchRemotive(ctx, client, keyword)
 		if err != nil {
 			return nil, err
@@ -189,11 +374,10 @@ func fetchRemotive(ctx context.Context, client *http.Client, query string) ([]Jo
 	values.Set("search", query)
 	endpoint := "https://remotive.com/api/remote-jobs?" + values.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := newAPIRequest(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "datascrap/0.1")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -254,11 +438,10 @@ func (JobicySource) Fetch(ctx context.Context, client *http.Client, query string
 		values.Set("tag", keyword)
 		endpoint := "https://jobicy.com/api/v2/remote-jobs?" + values.Encode()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		req, err := newAPIRequest(ctx, endpoint)
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("User-Agent", "datascrap/0.1")
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -326,7 +509,9 @@ func (JobicySource) Fetch(ctx context.Context, client *http.Client, query string
 			}
 		}
 
-		time.Sleep(750 * time.Millisecond)
+		if err := jitterDelay(ctx, 600*time.Millisecond, 1200*time.Millisecond); err != nil {
+			return nil, err
+		}
 	}
 	return dedupeJobs(allJobs), nil
 }
@@ -337,17 +522,16 @@ func (TheMuseSource) Name() string { return "themuse" }
 
 func (TheMuseSource) Fetch(ctx context.Context, client *http.Client, query string) ([]Job, error) {
 	var allJobs []Job
-	for _, keyword := range queryKeywords(query) {
+	for _, keyword := range searchKeywords(query) {
 		values := url.Values{}
 		values.Set("page", "1")
 		values.Set("keyword", keyword)
 		endpoint := "https://www.themuse.com/api/public/jobs?" + values.Encode()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		req, err := newAPIRequest(ctx, endpoint)
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("User-Agent", "datascrap/0.1")
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -426,7 +610,7 @@ func (AdzunaSource) Name() string { return "adzuna" }
 
 func (source AdzunaSource) Fetch(ctx context.Context, client *http.Client, query string) ([]Job, error) {
 	var allJobs []Job
-	for _, keyword := range queryKeywords(query) {
+	for _, keyword := range searchKeywords(query) {
 		values := url.Values{}
 		values.Set("app_id", source.AppID)
 		values.Set("app_key", source.AppKey)
@@ -436,11 +620,10 @@ func (source AdzunaSource) Fetch(ctx context.Context, client *http.Client, query
 		values.Set("content-type", "application/json")
 		endpoint := "https://api.adzuna.com/v1/api/jobs/br/search/1?" + values.Encode()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		req, err := newAPIRequest(ctx, endpoint)
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("User-Agent", "datascrap/0.1")
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -495,42 +678,39 @@ func (source AdzunaSource) Fetch(ctx context.Context, client *http.Client, query
 }
 
 type SerpAPISource struct {
-	APIKey string
+	APIKey     string
+	SourceName string
+	Site       string
 }
 
-func (SerpAPISource) Name() string { return "serpapi-linkedin-gupy-indeed" }
+func (source SerpAPISource) Name() string { return source.SourceName }
 
 func (source SerpAPISource) Fetch(ctx context.Context, client *http.Client, query string) ([]Job, error) {
-	targets := []struct {
-		Source string
-		Site   string
-	}{
-		{Source: "linkedin", Site: "linkedin.com/jobs"},
-		{Source: "gupy", Site: "gupy.io"},
-		{Source: "indeed", Site: "br.indeed.com"},
-	}
-
 	var allJobs []Job
-	for _, keyword := range queryKeywords(query) {
-		for _, target := range targets {
-			searches := []string{
-				fmt.Sprintf("site:%s %s remoto Brasil", target.Site, keyword),
-				fmt.Sprintf("site:%s %s Brasilia DF", target.Site, keyword),
-			}
-			for _, search := range searches {
-				jobs, err := source.fetchSearch(ctx, client, target.Source, search, query)
-				if err != nil {
-					return nil, err
-				}
-				allJobs = append(allJobs, jobs...)
-				time.Sleep(400 * time.Millisecond)
-			}
+	keywords := searchKeywords(query)
+	quoted := make([]string, 0, len(keywords))
+	for _, keyword := range keywords {
+		quoted = append(quoted, fmt.Sprintf("%q", keyword))
+	}
+	searchExpression := strings.Join(quoted, " OR ")
+	searches := []string{
+		fmt.Sprintf("site:%s (%s) remoto Brasil", source.Site, searchExpression),
+		fmt.Sprintf("site:%s (%s) Brasilia DF", source.Site, searchExpression),
+	}
+	for _, search := range searches {
+		jobs, err := source.fetchSearch(ctx, client, search, query)
+		if err != nil {
+			return nil, err
+		}
+		allJobs = append(allJobs, jobs...)
+		if err := jitterDelay(ctx, 500*time.Millisecond, 1100*time.Millisecond); err != nil {
+			return nil, err
 		}
 	}
 	return dedupeJobs(allJobs), nil
 }
 
-func (source SerpAPISource) fetchSearch(ctx context.Context, client *http.Client, sourceName string, search string, query string) ([]Job, error) {
+func (source SerpAPISource) fetchSearch(ctx context.Context, client *http.Client, search string, query string) ([]Job, error) {
 	values := url.Values{}
 	values.Set("engine", "google")
 	values.Set("q", search)
@@ -541,11 +721,10 @@ func (source SerpAPISource) fetchSearch(ctx context.Context, client *http.Client
 	values.Set("api_key", source.APIKey)
 	endpoint := "https://serpapi.com/search.json?" + values.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := newAPIRequest(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "datascrap/0.1")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -563,6 +742,7 @@ func (source SerpAPISource) fetchSearch(ctx context.Context, client *http.Client
 			Link    string `json:"link"`
 			Snippet string `json:"snippet"`
 			Source  string `json:"source"`
+			Date    string `json:"date"`
 		} `json:"organic_results"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -572,12 +752,14 @@ func (source SerpAPISource) fetchSearch(ctx context.Context, client *http.Client
 	var jobs []Job
 	for _, item := range payload.OrganicResults {
 		job := Job{
-			Source:   sourceName,
-			Title:    strings.TrimSpace(item.Title),
-			Company:  strings.TrimSpace(item.Source),
-			Location: inferLocation(item.Title + " " + item.Snippet),
-			URL:      item.Link,
-			Tags:     cleanTags([]string{"serpapi"}),
+			Source:      source.SourceName,
+			Title:       strings.TrimSpace(item.Title),
+			Description: strings.TrimSpace(item.Snippet),
+			Company:     strings.TrimSpace(item.Source),
+			Location:    inferLocation(item.Title + " " + item.Snippet),
+			URL:         item.Link,
+			Tags:        cleanTags([]string{"serpapi"}),
+			PostedAt:    strings.TrimSpace(item.Date),
 		}
 		if matchesTargetJobWithExtra(job, query, item.Snippet) {
 			jobs = append(jobs, job)
@@ -588,10 +770,25 @@ func (source SerpAPISource) fetchSearch(ctx context.Context, client *http.Client
 
 func main() {
 	query := flag.String("query", "engenheiro de dados junior,engenheiro dados junior,engenheiro de dados jr,analista de dados junior,analista dados junior,analista de dados jr,desenvolvedor python,junior data engineer,data engineer junior,junior data analyst,data analyst junior,python developer,etl,elt,pipeline de dados,data pipeline,data warehouse,data lake,python,sql,pyspark,apache spark,databricks,ibm datastage,apache airflow,db2,postgresql,mysql,power bi,n8n,power automate,selenium,rest api,json,gcp,docker,kafka", "comma-separated job and technology keywords")
+	sourceList := flag.String("sources", "remoteok,arbeitnow,remotive,jobicy,themuse", "comma-separated sources, public, or all")
 	format := flag.String("format", "csv", "output format: csv or json")
 	out := flag.String("out", "data/raw/vagas-dados.csv", "output file path")
+	envFile := flag.String("env", ".env", "optional environment file with API credentials")
 	timeout := flag.Duration("timeout", 90*time.Second, "request timeout")
+	minInterval := flag.Duration("min-interval", 1200*time.Millisecond, "minimum interval between requests to the same API host")
+	retries := flag.Int("retries", 3, "maximum retries for transient errors and rate limits")
+	cacheTTL := flag.Duration("cache-ttl", 6*time.Hour, "local HTTP cache lifetime; use 0 to disable")
+	cacheDir := flag.String("cache-dir", "data/cache/http", "directory for the local HTTP response cache")
 	flag.Parse()
+
+	if err := loadEnvFile(*envFile); err != nil {
+		fmt.Fprintf(os.Stderr, "Erro ao carregar %s: %v\n", *envFile, err)
+		os.Exit(1)
+	}
+	if len(queryKeywords(*query)) == 0 {
+		fmt.Fprintln(os.Stderr, "Erro: informe ao menos um termo em -query")
+		os.Exit(2)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "Erro ao criar diretório de saída: %v\n", err)
@@ -601,26 +798,17 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	client := &http.Client{Timeout: *timeout}
-	sources := []Source{
-		RemoteOKSource{},
-		ArbeitnowSource{},
-		RemotiveSource{},
-		JobicySource{},
-		TheMuseSource{},
+	transport := newResilientTransport(*minInterval, *retries, *cacheDir, *cacheTTL)
+	client := &http.Client{Timeout: *timeout, Transport: transport}
+	sources, err := buildSources(*sourceList)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Erro nas fontes: %v\n", err)
+		os.Exit(2)
 	}
-	if appID, appKey := os.Getenv("ADZUNA_APP_ID"), os.Getenv("ADZUNA_APP_KEY"); appID != "" && appKey != "" {
-		sources = append(sources, AdzunaSource{AppID: appID, AppKey: appKey})
-	} else {
-		fmt.Println("[info] Adzuna desativado: defina ADZUNA_APP_ID e ADZUNA_APP_KEY para buscar tambem nesse site")
-	}
-	if apiKey := os.Getenv("SERPAPI_KEY"); apiKey != "" {
-		sources = append(sources, SerpAPISource{APIKey: apiKey})
-	} else {
-		fmt.Println("[info] LinkedIn/Gupy/Indeed desativados: defina SERPAPI_KEY para buscar nesses sites sem automacao evasiva")
-	}
+	fmt.Printf("Fontes selecionadas: %s\n", strings.Join(sourceNames(sources), ", "))
 
 	var allJobs []Job
+	successfulSources := 0
 	for _, source := range sources {
 		stopLoading := startLoading(fmt.Sprintf("Buscando vagas em %s", source.Name()))
 		jobs, err := source.Fetch(ctx, client, *query)
@@ -629,11 +817,20 @@ func main() {
 			fmt.Printf("[erro] %s: %v\n", source.Name(), err)
 			continue
 		}
+		successfulSources++
 		fmt.Printf("[ok] %s encontrou %d vagas compativeis\n", source.Name(), len(jobs))
 		allJobs = append(allJobs, jobs...)
 	}
+	if successfulSources == 0 {
+		fmt.Fprintln(os.Stderr, "Erro: todas as fontes falharam; o arquivo de saída foi preservado")
+		os.Exit(1)
+	}
 
 	allJobs = dedupeJobs(allJobs)
+	collectedAt := time.Now().UTC().Format(time.RFC3339)
+	for index := range allJobs {
+		allJobs[index].CollectedAt = collectedAt
+	}
 	sort.Slice(allJobs, func(i, j int) bool {
 		if allJobs[i].PostedAt == allJobs[j].PostedAt {
 			return allJobs[i].Title < allJobs[j].Title
@@ -647,6 +844,15 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("Pronto: %d vagas salvas em %s\n", len(allJobs), *out)
+	stats := transport.Stats()
+	fmt.Printf(
+		"HTTP: %d requisicoes, %d cache hits, %d retries, %d limites recebidos, %d bloqueios preventivos\n",
+		stats.Requests,
+		stats.CacheHits,
+		stats.Retries,
+		stats.RateLimited,
+		stats.BlockedDirect+stats.CircuitStopped,
+	)
 }
 
 func startLoading(message string) func() {
@@ -686,6 +892,10 @@ func matchesTargetJobWithExtra(job Job, query string, extra string) bool {
 }
 
 func matchesRole(job Job, query string, extra string) bool {
+	if queryTargetsKnownRoles(query) && !containsAny(normalizeText(job.Title), targetRolePhrases()) {
+		return false
+	}
+
 	haystack := normalizeText(strings.Join([]string{
 		job.Title,
 		job.Company,
@@ -701,6 +911,46 @@ func matchesRole(job Job, query string, extra string) bool {
 		}
 	}
 	return false
+}
+
+func targetRolePhrases() []string {
+	return []string{
+		"engenheiro de dados",
+		"engenheiro dados",
+		"data engineer",
+		"analista de dados",
+		"analista dados",
+		"data analyst",
+		"desenvolvedor python",
+		"python developer",
+		"python engineer",
+	}
+}
+
+func queryTargetsKnownRoles(query string) bool {
+	normalized := normalizeText(query)
+	return containsAny(normalized, targetRolePhrases())
+}
+
+func searchKeywords(query string) []string {
+	keywords := queryKeywords(query)
+	var roleKeywords []string
+	for _, keyword := range keywords {
+		normalized := normalizeText(keyword)
+		if containsAny(normalized, targetRolePhrases()) {
+			roleKeywords = append(roleKeywords, keyword)
+		}
+	}
+	if len(roleKeywords) > 0 {
+		if len(roleKeywords) > 8 {
+			return roleKeywords[:8]
+		}
+		return roleKeywords
+	}
+	if len(keywords) > 10 {
+		return keywords[:10]
+	}
+	return keywords
 }
 
 func queryKeywords(query string) []string {
@@ -749,12 +999,11 @@ func jobicyKeywords(query string) []string {
 	return out
 }
 
-func matchesLocationRule(job Job, extra string) bool {
+func matchesLocationRule(job Job, _ string) bool {
 	text := normalizeText(strings.Join([]string{
 		job.Title,
 		job.Location,
 		strings.Join(job.Tags, " "),
-		extra,
 	}, " "))
 
 	if isBrasilia(text) {
@@ -927,6 +1176,7 @@ func writeJobs(path string, format string, jobs []Job) error {
 			"url",
 			"tags",
 			"posted_at",
+			"collected_at",
 			"salary_min",
 			"salary_max",
 			"salary_currency",
@@ -945,6 +1195,7 @@ func writeJobs(path string, format string, jobs []Job) error {
 				job.URL,
 				strings.Join(job.Tags, "|"),
 				job.PostedAt,
+				job.CollectedAt,
 				formatFloat(job.SalaryMin),
 				formatFloat(job.SalaryMax),
 				job.SalaryCurrency,

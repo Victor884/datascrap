@@ -16,6 +16,10 @@ apps/web/src/.hermes-tmp.*
 
 apps/api/*.egg-info/
 .hermes/
+.design-audit/
+.cache/
+data/cache/
+data/profiles/
 
 *.exe
 *.dll
